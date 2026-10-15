@@ -38,6 +38,13 @@ export class UpdateApartmentDto {
   @IsOptional()
   areaSqft?: number;
 
+  @ApiPropertyOptional({ description: 'Number of rooms', example: 2 })
+  @ValidateIf((_, v) => v !== null && v !== undefined)
+  @IsNumber()
+  @Min(1)
+  @IsOptional()
+  roomCount?: number;
+
   @ApiPropertyOptional({ enum: ApartmentStatus })
   @ValidateIf((_, v) => v !== null && v !== undefined)
   @IsEnum(ApartmentStatus)

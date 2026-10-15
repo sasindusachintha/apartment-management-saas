@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../context/AuthContext';
 import {
@@ -11,7 +12,11 @@ import {
   Loader2,
   X,
   Printer,
+  RotateCcw,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
+import OfficialBillView from '../../components/OfficialBillView';
 
 interface Invoice {
   id: string;
@@ -65,11 +70,27 @@ interface Invoice {
 
 export default function InvoicesPage() {
   const { activeOrg, hasPermission } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Search & Filters synchronized with URL
+  const urlSearch = searchParams.get('search') || '';
+  const urlStatus = searchParams.get('status') || '';
+  const urlPeriod = searchParams.get('periodCode') || '';
+  const urlApartment = searchParams.get('apartmentId') || '';
+
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [selectedInvoice, setSelectedInvoice] = useState<any | null>(null);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
-  const [periodFilter, setPeriodFilter] = useState('');
+  const [searchTerm, setSearchTerm] = useState(urlSearch);
+  const [statusFilter, setStatusFilter] = useState(urlStatus);
+  const [periodFilter, setPeriodFilter] = useState(urlPeriod);
+  const [apartmentFilter, setApartmentFilter] = useState(urlApartment);
+  const [customerFilter, setCustomerFilter] = useState('');
+  const [groupBy, setGroupBy] = useState<'none' | 'apartment' | 'period'>('none');
+
+  // Pagination
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
+
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -89,17 +110,39 @@ export default function InvoicesPage() {
   const canManage = hasPermission('billing.manage');
   const printRef = useRef<HTMLDivElement>(null);
 
+  // Keep searchTerm synchronized with URL query parameter changes
+  useEffect(() => {
+    const q = searchParams.get('search') || '';
+    if (q !== searchTerm) {
+      setSearchTerm(q);
+    }
+    const st = searchParams.get('status') || '';
+    if (st !== statusFilter) {
+      setStatusFilter(st);
+    }
+    const pc = searchParams.get('periodCode') || '';
+    if (pc !== periodFilter) {
+      setPeriodFilter(pc);
+    }
+    const ap = searchParams.get('apartmentId') || '';
+    if (ap !== apartmentFilter) {
+      setApartmentFilter(ap);
+    }
+  }, [searchParams]);
+
+  // Fetch Invoices from Backend
   const fetchInvoices = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
-      let url = `/billing/invoices?`;
-      if (activeOrg) url += `organizationId=${activeOrg.id}&`;
-      if (statusFilter) url += `status=${statusFilter}&`;
-      if (periodFilter) url += `periodCode=${periodFilter}&`;
-      if (searchTerm) url += `search=${encodeURIComponent(searchTerm)}&`;
+      const params = new URLSearchParams();
+      if (activeOrg) params.append('organizationId', activeOrg.id);
+      if (statusFilter) params.append('status', statusFilter);
+      if (periodFilter) params.append('periodCode', periodFilter);
+      if (apartmentFilter) params.append('apartmentId', apartmentFilter);
+      if (searchTerm) params.append('search', searchTerm.trim());
 
-      const { data } = await api.get(url);
+      const { data } = await api.get(`/billing/invoices?${params.toString()}`);
       setInvoices(data);
     } catch (err: unknown) {
       const msg =
@@ -109,11 +152,159 @@ export default function InvoicesPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [activeOrg, statusFilter, periodFilter, searchTerm]);
+  }, [activeOrg, statusFilter, periodFilter, apartmentFilter, searchTerm]);
 
   useEffect(() => {
     fetchInvoices();
   }, [fetchInvoices]);
+
+  // Handle Search Input Change & URL Sync
+  const handleSearchChange = (val: string) => {
+    setSearchTerm(val);
+    const next = new URLSearchParams(searchParams);
+    if (val.trim()) {
+      next.set('search', val);
+    } else {
+      next.delete('search');
+    }
+    setSearchParams(next, { replace: true });
+    setCurrentPage(1);
+  };
+
+  // Clear Search button (x)
+  const handleClearSearch = () => {
+    setSearchTerm('');
+    const next = new URLSearchParams(searchParams);
+    next.delete('search');
+    setSearchParams(next, { replace: true });
+    setCurrentPage(1);
+  };
+
+  // Status Filter change
+  const handleStatusChange = (val: string) => {
+    setStatusFilter(val);
+    const next = new URLSearchParams(searchParams);
+    if (val) next.set('status', val);
+    else next.delete('status');
+    setSearchParams(next, { replace: true });
+    setCurrentPage(1);
+  };
+
+  // Period Filter change
+  const handlePeriodChange = (val: string) => {
+    setPeriodFilter(val);
+    const next = new URLSearchParams(searchParams);
+    if (val) next.set('periodCode', val);
+    else next.delete('periodCode');
+    setSearchParams(next, { replace: true });
+    setCurrentPage(1);
+  };
+
+  // Apartment Filter change
+  const handleApartmentChange = (val: string) => {
+    setApartmentFilter(val);
+    const next = new URLSearchParams(searchParams);
+    if (val) next.set('apartmentId', val);
+    else next.delete('apartmentId');
+    setSearchParams(next, { replace: true });
+    setCurrentPage(1);
+  };
+
+  // Clear All Filters
+  const handleClearAllFilters = () => {
+    setSearchTerm('');
+    setStatusFilter('');
+    setPeriodFilter('');
+    setApartmentFilter('');
+    setCustomerFilter('');
+    setGroupBy('none');
+    setCurrentPage(1);
+    setSearchParams({}, { replace: true });
+  };
+
+  const hasActiveFilters = Boolean(
+    searchTerm || statusFilter || periodFilter || apartmentFilter || customerFilter,
+  );
+
+  // 1. Deduplicate invoices so one invoice record is displayed only once
+  const uniqueInvoices = useMemo(() => {
+    const map = new Map<string, Invoice>();
+    invoices.forEach((inv) => {
+      if (inv && inv.id && !map.has(inv.id)) {
+        map.set(inv.id, inv);
+      }
+    });
+    return Array.from(map.values());
+  }, [invoices]);
+
+  // Extract distinct available periods and apartments for filter dropdowns
+  const availablePeriods = useMemo(() => {
+    const set = new Set<string>();
+    uniqueInvoices.forEach((inv) => {
+      if (inv.periodCode) set.add(inv.periodCode);
+    });
+    return Array.from(set).sort().reverse();
+  }, [uniqueInvoices]);
+
+  const availableApartments = useMemo(() => {
+    const map = new Map<string, string>();
+    uniqueInvoices.forEach((inv) => {
+      if (inv.apartment?.id) {
+        map.set(
+          inv.apartment.id,
+          `Unit ${inv.apartment.unitNumber}${inv.apartment.tower ? ` (${inv.apartment.tower.name})` : ''}`,
+        );
+      }
+    });
+    return Array.from(map.entries()).map(([id, label]) => ({ id, label }));
+  }, [uniqueInvoices]);
+
+  // Client-side customer filter if specified
+  const filteredInvoices = useMemo(() => {
+    if (!customerFilter.trim()) return uniqueInvoices;
+    const cLower = customerFilter.toLowerCase().trim();
+    return uniqueInvoices.filter((inv) => {
+      const owner = (inv.apartment?.ownerName || '').toLowerCase();
+      const resident = (inv.apartment?.residentName || '').toLowerCase();
+      return owner.includes(cLower) || resident.includes(cLower);
+    });
+  }, [uniqueInvoices, customerFilter]);
+
+  // Total Outstanding Amount (Accurate, never counting duplicates)
+  const totalBilled = useMemo(
+    () => filteredInvoices.reduce((sum, inv) => sum + Number(inv.totalDue || 0), 0),
+    [filteredInvoices],
+  );
+  const totalPaid = useMemo(
+    () => filteredInvoices.reduce((sum, inv) => sum + Number(inv.paidAmount || 0), 0),
+    [filteredInvoices],
+  );
+  const totalBalanceDue = useMemo(
+    () => filteredInvoices.reduce((sum, inv) => sum + Number(inv.balanceDue || 0), 0),
+    [filteredInvoices],
+  );
+
+  // Pagination calculation
+  const totalPages = Math.max(1, Math.ceil(filteredInvoices.length / itemsPerPage));
+  const paginatedInvoices = useMemo(() => {
+    const start = (currentPage - 1) * itemsPerPage;
+    return filteredInvoices.slice(start, start + itemsPerPage);
+  }, [filteredInvoices, currentPage, itemsPerPage]);
+
+  // Grouped Invoices
+  const groupedInvoices = useMemo(() => {
+    if (groupBy === 'none') return null;
+    const groups: { [key: string]: Invoice[] } = {};
+    filteredInvoices.forEach((inv) => {
+      const key =
+        groupBy === 'apartment'
+          ? `Unit ${inv.apartment.unitNumber}${inv.apartment.ownerName ? ` — ${inv.apartment.ownerName}` : ''}`
+          : `Billing Period: ${inv.billingPeriod?.name || inv.periodCode}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(inv);
+    });
+    return groups;
+  }, [filteredInvoices, groupBy]);
 
   // View Detailed Invoice
   const handleView = async (inv: Invoice) => {
@@ -194,24 +385,6 @@ export default function InvoicesPage() {
     window.print();
   };
 
-  // Filter room maintenance items for display
-  const roomItems = selectedInvoice?.items?.filter(
-    (it: any) => it.itemType === 'ROOM_MAINTENANCE',
-  ) || [];
-
-  const otherChargeItems = selectedInvoice?.items?.filter(
-    (it: any) => it.itemType !== 'MAINTENANCE' && it.itemType !== 'ROOM_MAINTENANCE' && it.itemType !== 'WATER',
-  ) || [];
-
-  const buildingSettings = selectedInvoice?.building?.billingSettings?.[0] || {};
-  const bankName = buildingSettings.bankName || 'Sampath Bank PLC';
-  const branchName = buildingSettings.bankBranch || 'Wellawatta Branch';
-  const accountName = buildingSettings.bankAccountName || 'Span Tower IX Management Corporation';
-  const accountNumber = buildingSettings.bankAccountNumber || '003660000312';
-  const contactEmail = buildingSettings.contactEmail || 'span.ebenezer@gmail.com';
-  const contactPhone = buildingSettings.contactPhone || '+94 770201034';
-  const contactPerson = buildingSettings.contactPerson || 'Mr. Tony David';
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
       {/* ─── PRINT-ONLY CSS ──────────────────────────────────── */}
@@ -261,8 +434,91 @@ export default function InvoicesPage() {
             Apartment Invoices & Bills
           </h2>
           <p style={{ color: 'var(--color-text-secondary)', fontSize: '0.9rem' }}>
-            Official Span Tower IX condominium maintenance fees, room breakdowns, water bills, and payment records.
+            Official condominium maintenance fees, room breakdowns, water bills, and payment records.
           </p>
+        </div>
+
+        {hasActiveFilters && (
+          <button
+            onClick={handleClearAllFilters}
+            className="btn btn-outline"
+            style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem' }}
+          >
+            <RotateCcw size={14} /> Clear All Filters
+          </button>
+        )}
+      </div>
+
+      {/* Financial Summary KPI Cards (Authoritative, deduplicated calculations) */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+          gap: 'var(--space-4)',
+        }}
+      >
+        <div className="card" style={{ padding: 'var(--space-4)', background: 'var(--color-surface-1)' }}>
+          <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-text-secondary)', textTransform: 'uppercase' }}>
+            Total Invoices
+          </div>
+          <div style={{ fontSize: '1.5rem', fontWeight: 800, color: 'var(--color-text-primary)', marginTop: '4px' }}>
+            {filteredInvoices.length}
+          </div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: '2px' }}>
+            {uniqueInvoices.length !== filteredInvoices.length
+              ? `Filtered from ${uniqueInvoices.length} total`
+              : 'Unique billing records'}
+          </div>
+        </div>
+
+        <div className="card" style={{ padding: 'var(--space-4)', background: 'var(--color-surface-1)' }}>
+          <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-text-secondary)', textTransform: 'uppercase' }}>
+            Total Billed
+          </div>
+          <div style={{ fontSize: '1.5rem', fontWeight: 800, color: 'var(--color-text-primary)', marginTop: '4px' }}>
+            Rs. {totalBilled.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: '2px' }}>
+            Gross scheduled charges
+          </div>
+        </div>
+
+        <div className="card" style={{ padding: 'var(--space-4)', background: 'var(--color-surface-1)' }}>
+          <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-text-secondary)', textTransform: 'uppercase' }}>
+            Total Paid
+          </div>
+          <div style={{ fontSize: '1.5rem', fontWeight: 800, color: 'var(--color-success-500)', marginTop: '4px' }}>
+            Rs. {totalPaid.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: '2px' }}>
+            Allocated collections
+          </div>
+        </div>
+
+        <div
+          className="card"
+          style={{
+            padding: 'var(--space-4)',
+            background: totalBalanceDue > 0 ? 'rgba(239, 68, 68, 0.05)' : 'rgba(16, 185, 129, 0.05)',
+            border: totalBalanceDue > 0 ? '1px solid var(--color-danger-500)' : '1px solid var(--color-success-500)',
+          }}
+        >
+          <div style={{ fontSize: '0.75rem', fontWeight: 600, color: totalBalanceDue > 0 ? 'var(--color-danger-500)' : 'var(--color-success-500)', textTransform: 'uppercase' }}>
+            Outstanding Balance
+          </div>
+          <div
+            style={{
+              fontSize: '1.5rem',
+              fontWeight: 800,
+              color: totalBalanceDue > 0 ? 'var(--color-danger-500)' : 'var(--color-success-500)',
+              marginTop: '4px',
+            }}
+          >
+            Rs. {totalBalanceDue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: '2px' }}>
+            Net outstanding dues
+          </div>
         </div>
       </div>
 
@@ -272,65 +528,197 @@ export default function InvoicesPage() {
         style={{
           padding: 'var(--space-4)',
           display: 'flex',
-          flexWrap: 'wrap',
+          flexDirection: 'column',
           gap: 'var(--space-3)',
-          alignItems: 'center',
         }}
       >
-        <div style={{ minWidth: '160px' }}>
-          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-text-secondary)', marginBottom: '4px', display: 'block' }}>
-            Status
-          </label>
-          <select
-            className="input"
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            style={{ width: '100%', padding: '0.5rem' }}
-          >
-            <option value="">All Statuses</option>
-            <option value="DRAFT">Draft</option>
-            <option value="ISSUED">Issued</option>
-            <option value="PARTIALLY_PAID">Partially Paid</option>
-            <option value="PAID">Fully Paid</option>
-            <option value="OVERDUE">Overdue</option>
-            <option value="VOID">Voided</option>
-          </select>
-        </div>
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 'var(--space-3)',
+            alignItems: 'center',
+          }}
+        >
+          {/* Search Input with inline Clear (x) button */}
+          <div style={{ flex: 2, minWidth: '260px' }}>
+            <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-text-secondary)', marginBottom: '4px', display: 'block' }}>
+              Search Customer, Unit or Invoice #
+            </label>
+            <div style={{ position: 'relative' }}>
+              <Search
+                size={16}
+                color="var(--color-text-muted)"
+                style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }}
+              />
+              <input
+                type="text"
+                className="input"
+                placeholder="Search Invoice #, Unit (e.g. 1A, A-101), Resident (e.g. Mr. K. Perera)..."
+                value={searchTerm}
+                onChange={(e) => handleSearchChange(e.target.value)}
+                style={{ paddingLeft: '36px', paddingRight: searchTerm ? '36px' : '12px', width: '100%', height: '40px' }}
+              />
+              {searchTerm && (
+                <button
+                  type="button"
+                  onClick={handleClearSearch}
+                  title="Clear search"
+                  style={{
+                    position: 'absolute',
+                    right: '10px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    background: 'var(--color-surface-3)',
+                    border: 'none',
+                    borderRadius: '50%',
+                    width: '20px',
+                    height: '20px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: 'pointer',
+                    color: 'var(--color-text-primary)',
+                  }}
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+          </div>
 
-        <div style={{ minWidth: '160px' }}>
-          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-text-secondary)', marginBottom: '4px', display: 'block' }}>
-            Period Code
-          </label>
-          <input
-            type="text"
-            className="input"
-            placeholder="e.g. 2026-10"
-            value={periodFilter}
-            onChange={(e) => setPeriodFilter(e.target.value)}
-            style={{ width: '100%', padding: '0.5rem' }}
-          />
-        </div>
-
-        <div style={{ flex: 2, minWidth: '240px' }}>
-          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-text-secondary)', marginBottom: '4px', display: 'block' }}>
-            Search Unit or Occupant
-          </label>
-          <div style={{ position: 'relative' }}>
-            <Search
-              size={16}
-              color="var(--color-text-muted)"
-              style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }}
-            />
-            <input
-              type="text"
+          {/* Status Filter */}
+          <div style={{ minWidth: '150px' }}>
+            <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-text-secondary)', marginBottom: '4px', display: 'block' }}>
+              Status
+            </label>
+            <select
               className="input"
-              placeholder="Search Invoice #, Unit (e.g. 6/3, A-101)..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              style={{ paddingLeft: '36px', width: '100%' }}
-            />
+              value={statusFilter}
+              onChange={(e) => handleStatusChange(e.target.value)}
+              style={{ width: '100%', height: '40px', padding: '0.5rem' }}
+            >
+              <option value="">All Statuses</option>
+              <option value="DRAFT">Draft</option>
+              <option value="ISSUED">Issued</option>
+              <option value="PARTIALLY_PAID">Partially Paid</option>
+              <option value="PAID">Fully Paid</option>
+              <option value="OVERDUE">Overdue</option>
+              <option value="VOID">Voided</option>
+            </select>
+          </div>
+
+          {/* Period Code Filter */}
+          <div style={{ minWidth: '150px' }}>
+            <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-text-secondary)', marginBottom: '4px', display: 'block' }}>
+              Billing Period
+            </label>
+            <select
+              className="input"
+              value={periodFilter}
+              onChange={(e) => handlePeriodChange(e.target.value)}
+              style={{ width: '100%', height: '40px', padding: '0.5rem' }}
+            >
+              <option value="">All Periods</option>
+              {availablePeriods.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Apartment Unit Filter */}
+          <div style={{ minWidth: '160px' }}>
+            <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-text-secondary)', marginBottom: '4px', display: 'block' }}>
+              Apartment Unit
+            </label>
+            <select
+              className="input"
+              value={apartmentFilter}
+              onChange={(e) => handleApartmentChange(e.target.value)}
+              style={{ width: '100%', height: '40px', padding: '0.5rem' }}
+            >
+              <option value="">All Apartments</option>
+              {availableApartments.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Grouping Toggle */}
+          <div style={{ minWidth: '160px' }}>
+            <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-text-secondary)', marginBottom: '4px', display: 'block' }}>
+              Group Invoices
+            </label>
+            <select
+              className="input"
+              value={groupBy}
+              onChange={(e) => setGroupBy(e.target.value as any)}
+              style={{ width: '100%', height: '40px', padding: '0.5rem' }}
+            >
+              <option value="none">No Grouping</option>
+              <option value="apartment">Group by Apartment</option>
+              <option value="period">Group by Billing Period</option>
+            </select>
           </div>
         </div>
+
+        {/* Active Filters Summary Bar */}
+        {hasActiveFilters && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: '6px',
+              paddingTop: 'var(--space-2)',
+              borderTop: '1px solid var(--color-border-subtle)',
+            }}
+          >
+            <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', fontWeight: 600 }}>Active Filters:</span>
+            {searchTerm && (
+              <span className="badge badge-primary" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem' }}>
+                Search: "{searchTerm}"
+                <X size={12} style={{ cursor: 'pointer' }} onClick={handleClearSearch} />
+              </span>
+            )}
+            {statusFilter && (
+              <span className="badge badge-primary" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem' }}>
+                Status: {statusFilter}
+                <X size={12} style={{ cursor: 'pointer' }} onClick={() => handleStatusChange('')} />
+              </span>
+            )}
+            {periodFilter && (
+              <span className="badge badge-primary" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem' }}>
+                Period: {periodFilter}
+                <X size={12} style={{ cursor: 'pointer' }} onClick={() => handlePeriodChange('')} />
+              </span>
+            )}
+            {apartmentFilter && (
+              <span className="badge badge-primary" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem' }}>
+                Apartment filtered
+                <X size={12} style={{ cursor: 'pointer' }} onClick={() => handleApartmentChange('')} />
+              </span>
+            )}
+            <button
+              onClick={handleClearAllFilters}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'var(--color-brand-400)',
+                fontSize: '0.75rem',
+                cursor: 'pointer',
+                textDecoration: 'underline',
+                marginLeft: '6px',
+              }}
+            >
+              Reset All
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Error Message */}
@@ -352,136 +740,173 @@ export default function InvoicesPage() {
         </div>
       )}
 
-      {/* Invoices Table */}
+      {/* Invoices Table Card */}
       <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
         {isLoading ? (
           <div style={{ padding: 'var(--space-12)', textAlign: 'center', color: 'var(--color-text-secondary)' }}>
             <Loader2 className="animate-spin" size={32} style={{ margin: '0 auto var(--space-3)' }} />
             <p>Loading invoices and billing statements...</p>
           </div>
-        ) : invoices.length === 0 ? (
+        ) : filteredInvoices.length === 0 ? (
           <div style={{ padding: 'var(--space-12)', textAlign: 'center', color: 'var(--color-text-muted)' }}>
             <FileText size={40} style={{ margin: '0 auto var(--space-3)', opacity: 0.5 }} />
-            <p style={{ fontWeight: 600, color: 'var(--color-text-secondary)' }}>No invoices found</p>
-            <p style={{ fontSize: '0.85rem', marginTop: '4px' }}>
-              Generate monthly bills from the Monthly Billing page to view them here.
+            <p style={{ fontWeight: 600, color: 'var(--color-text-primary)' }}>No invoices found</p>
+            <p style={{ fontSize: '0.85rem', marginTop: '4px', color: 'var(--color-text-secondary)' }}>
+              {hasActiveFilters
+                ? 'No invoices match your selected filters. Click "Clear All Filters" to view all statements.'
+                : 'Generate monthly bills from the Monthly Billing page to view them here.'}
             </p>
+            {hasActiveFilters && (
+              <button
+                className="btn btn-outline"
+                onClick={handleClearAllFilters}
+                style={{ marginTop: 'var(--space-4)', fontSize: '0.85rem' }}
+              >
+                Clear All Filters
+              </button>
+            )}
+          </div>
+        ) : groupBy !== 'none' && groupedInvoices ? (
+          /* Grouped Rendering */
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', padding: 'var(--space-4)' }}>
+            {Object.entries(groupedInvoices).map(([groupTitle, groupItems]) => {
+              const groupTotal = groupItems.reduce((sum, it) => sum + Number(it.totalDue || 0), 0);
+              const groupBalance = groupItems.reduce((sum, it) => sum + Number(it.balanceDue || 0), 0);
+
+              return (
+                <div
+                  key={groupTitle}
+                  style={{
+                    border: '1px solid var(--color-border)',
+                    borderRadius: 'var(--radius-md)',
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div
+                    style={{
+                      background: 'var(--color-surface-2)',
+                      padding: '10px 16px',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      fontWeight: 700,
+                      borderBottom: '1px solid var(--color-border)',
+                    }}
+                  >
+                    <div>{groupTitle}</div>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
+                      {groupItems.length} {groupItems.length === 1 ? 'Invoice' : 'Invoices'} · Total:{' '}
+                      <strong>Rs. {groupTotal.toLocaleString('en-US', { minimumFractionDigits: 2 })}</strong>
+                      {groupBalance > 0 && (
+                        <span style={{ color: 'var(--color-danger-500)', marginLeft: '8px' }}>
+                          (Due: Rs. {groupBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })})
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div style={{ overflowX: 'auto' }}>
+                    <table className="table" style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                      <thead>
+                        <tr style={{ background: 'var(--color-surface-1)', borderBottom: '1px solid var(--color-border-subtle)', fontSize: '0.8rem' }}>
+                          <th style={{ padding: '8px 12px' }}>Invoice #</th>
+                          <th style={{ padding: '8px 12px' }}>Unit</th>
+                          <th style={{ padding: '8px 12px' }}>Period</th>
+                          <th style={{ padding: '8px 12px' }}>Due Date</th>
+                          <th style={{ padding: '8px 12px', textAlign: 'right' }}>Total Bill</th>
+                          <th style={{ padding: '8px 12px', textAlign: 'right' }}>Paid</th>
+                          <th style={{ padding: '8px 12px', textAlign: 'right' }}>Balance Due</th>
+                          <th style={{ padding: '8px 12px' }}>Status</th>
+                          <th style={{ padding: '8px 12px', textAlign: 'center' }}>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {groupItems.map((inv) => renderInvoiceRow(inv))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table className="table" style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
-              <thead>
-                <tr style={{ background: 'var(--color-surface-2)', borderBottom: '1px solid var(--color-border)' }}>
-                  <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Invoice #</th>
-                  <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Apartment Unit</th>
-                  <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Period</th>
-                  <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Due Date</th>
-                  <th style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right' }}>Total Bill</th>
-                  <th style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right' }}>Paid</th>
-                  <th style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right' }}>Balance Due</th>
-                  <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Status</th>
-                  <th style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'center' }}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {invoices.map((inv) => {
-                  const bal = Number(inv.balanceDue);
-                  return (
-                    <tr
-                      key={inv.id}
-                      style={{
-                        borderBottom: '1px solid var(--color-border-subtle)',
-                        transition: 'background 0.15s ease',
-                      }}
-                    >
-                      <td style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600, color: 'var(--color-text-primary)' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <FileText size={14} color="var(--color-brand-400)" />
-                          <span>{inv.invoiceNumber}</span>
-                        </div>
-                      </td>
-                      <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
-                        <div style={{ fontWeight: 700, color: 'var(--color-text-primary)' }}>
-                          Unit {inv.apartment.unitNumber} {inv.apartment.tower ? `(${inv.apartment.tower.name})` : ''}
-                        </div>
-                        <div style={{ fontSize: '0.75rem', color: 'var(--color-text-secondary)' }}>
-                          {inv.apartment.ownerName || '-'}
-                        </div>
-                      </td>
-                      <td style={{ padding: 'var(--space-3) var(--space-4)', fontSize: '0.85rem' }}>
-                        {inv.periodCode}
-                      </td>
-                      <td style={{ padding: 'var(--space-3) var(--space-4)', fontSize: '0.85rem' }}>
-                        {new Date(inv.dueDate).toLocaleDateString()}
-                      </td>
-                      <td style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right', fontWeight: 700 }}>
-                        Rs. {Number(inv.totalDue).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                      </td>
-                      <td style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right', color: 'var(--color-success-500)', fontWeight: 600 }}>
-                        Rs. {Number(inv.paidAmount).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                      </td>
-                      <td style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right', fontWeight: 800 }}>
-                        {bal > 0 ? (
-                          <span style={{ color: 'var(--color-danger-500)' }}>
-                            Rs. {bal.toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                          </span>
-                        ) : (
-                          <span style={{ color: 'var(--color-success-500)' }}>Rs. 0.00</span>
-                        )}
-                      </td>
-                      <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
-                        <span
-                          className={`badge ${
-                            inv.status === 'PAID'
-                              ? 'badge-success'
-                              : inv.status === 'ISSUED'
-                              ? 'badge-primary'
-                              : inv.status === 'PARTIALLY_PAID'
-                              ? 'badge-warning'
-                              : inv.status === 'OVERDUE'
-                              ? 'badge-danger'
-                              : 'badge-outline'
-                          }`}
-                          style={{ fontSize: '0.7rem' }}
-                        >
-                          {inv.status}
-                        </span>
-                      </td>
-                      <td style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'center' }}>
-                        <div style={{ display: 'flex', justifyContent: 'center', gap: '6px' }}>
-                          <button
-                            className="btn-ghost"
-                            title="View Span Tower IX Bill Breakdown"
-                            onClick={() => handleView(inv)}
-                            style={{ padding: '6px' }}
-                          >
-                            <Eye size={15} color="var(--color-brand-400)" />
-                          </button>
-                          <button
-                            className="btn-ghost"
-                            title="Download Official PDF Bill"
-                            onClick={() => downloadPdf(inv.id)}
-                            style={{ padding: '6px' }}
-                          >
-                            <Download size={15} color="var(--color-text-secondary)" />
-                          </button>
-                          {canManage && inv.status !== 'DRAFT' && inv.status !== 'VOID' && (
-                            <button
-                              className="btn-ghost"
-                              title="Auditable Financial Adjustment"
-                              onClick={() => openAdjustModal(inv)}
-                              style={{ padding: '6px' }}
-                            >
-                              <Sliders size={15} color="var(--color-accent-400)" />
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          /* Standard Paginated Table */
+          <div>
+            <div style={{ overflowX: 'auto' }}>
+              <table className="table" style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                <thead>
+                  <tr style={{ background: 'var(--color-surface-2)', borderBottom: '1px solid var(--color-border)' }}>
+                    <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Invoice #</th>
+                    <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Apartment Unit</th>
+                    <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Period</th>
+                    <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Due Date</th>
+                    <th style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right' }}>Total Bill</th>
+                    <th style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right' }}>Paid</th>
+                    <th style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right' }}>Balance Due</th>
+                    <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Status</th>
+                    <th style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'center' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paginatedInvoices.map((inv) => renderInvoiceRow(inv))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination Controls */}
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: 'var(--space-3) var(--space-4)',
+                borderTop: '1px solid var(--color-border)',
+                background: 'var(--color-surface-1)',
+                flexWrap: 'wrap',
+                gap: '8px',
+                fontSize: '0.85rem',
+              }}
+            >
+              <div style={{ color: 'var(--color-text-secondary)' }}>
+                Showing{' '}
+                <strong>
+                  {Math.min((currentPage - 1) * itemsPerPage + 1, filteredInvoices.length)}–
+                  {Math.min(currentPage * itemsPerPage, filteredInvoices.length)}
+                </strong>{' '}
+                of <strong>{filteredInvoices.length}</strong> invoices
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <button
+                  className="btn btn-outline"
+                  disabled={currentPage <= 1}
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  style={{ padding: '4px 10px', fontSize: '0.8rem' }}
+                >
+                  <ChevronLeft size={14} /> Previous
+                </button>
+
+                {Array.from({ length: totalPages }, (_, i) => i + 1).map((pg) => (
+                  <button
+                    key={pg}
+                    className={pg === currentPage ? 'btn btn-primary' : 'btn btn-outline'}
+                    onClick={() => setCurrentPage(pg)}
+                    style={{ padding: '4px 10px', fontSize: '0.8rem', minWidth: '32px' }}
+                  >
+                    {pg}
+                  </button>
+                ))}
+
+                <button
+                  className="btn btn-outline"
+                  disabled={currentPage >= totalPages}
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  style={{ padding: '4px 10px', fontSize: '0.8rem' }}
+                >
+                  Next <ChevronRight size={14} />
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </div>
@@ -521,297 +946,9 @@ export default function InvoicesPage() {
               </div>
             </div>
 
-            {/* ─── AUTHENTIC SPAN TOWER IX BILL SHEET ───────────── */}
-            <div
-              id="span-tower-bill-print"
-              ref={printRef}
-              style={{
-                background: '#ffffff',
-                color: '#111827',
-                padding: '24px',
-                borderRadius: 'var(--radius-md)',
-                border: '2px solid #374151',
-                fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-                fontSize: '13px',
-                lineHeight: 1.5,
-              }}
-            >
-              {/* Outer Bordered Grid Box Matching User's Image */}
-              <div style={{ border: '2px solid #111827' }}>
-                {/* Header */}
-                <div
-                  style={{
-                    borderBottom: '2px solid #111827',
-                    padding: '10px 14px',
-                    textAlign: 'center',
-                    fontWeight: 800,
-                    fontSize: '13px',
-                    letterSpacing: '0.5px',
-                    textTransform: 'uppercase',
-                    background: '#f9fafb',
-                  }}
-                >
-                  SPAN TOWER IX MANAGEMENT CORPORATION -MAINTENANCE FEE & WATER BILL
-                </div>
-
-                {/* Row: Apartment No */}
-                <div style={{ display: 'flex', borderBottom: '1px solid #111827' }}>
-                  <div style={{ width: '40%', padding: '8px 12px', fontWeight: 700, borderRight: '1px solid #111827' }}>
-                    Apartment No
-                  </div>
-                  <div style={{ width: '60%', padding: '8px 12px', fontWeight: 700 }}>
-                    {selectedInvoice.apartment?.unitNumber}
-                    {selectedInvoice.apartment?.tower ? ` (${selectedInvoice.apartment.tower.name})` : ''}
-                    {selectedInvoice.apartment?.floor ? ` / Floor ${selectedInvoice.apartment.floor}` : ''}
-                  </div>
-                </div>
-
-                {/* Row: Month */}
-                <div style={{ display: 'flex', borderBottom: '1px solid #111827' }}>
-                  <div style={{ width: '40%', padding: '8px 12px', fontWeight: 700, borderRight: '1px solid #111827' }}>
-                    Month
-                  </div>
-                  <div style={{ width: '60%', padding: '8px 12px' }}>
-                    {selectedInvoice.billingPeriod?.name || selectedInvoice.periodCode}
-                  </div>
-                </div>
-
-                {/* Row: Previous Dues */}
-                <div style={{ display: 'flex', borderBottom: '1px solid #111827' }}>
-                  <div style={{ width: '40%', padding: '8px 12px', fontWeight: 700, borderRight: '1px solid #111827' }}>
-                    Previous Dues
-                  </div>
-                  <div style={{ width: '60%', padding: '8px 12px', fontWeight: 600 }}>
-                    {Number(selectedInvoice.previousArrears) > 0
-                      ? `${Number(selectedInvoice.previousArrears).toFixed(2).replace('.', '/')}`
-                      : '0/00'}
-                  </div>
-                </div>
-
-                {/* Row: Maintenance Fee (with itemized room table if rooms exist) */}
-                <div style={{ display: 'flex', borderBottom: '1px solid #111827' }}>
-                  <div style={{ width: '40%', padding: '8px 12px', fontWeight: 700, borderRight: '1px solid #111827' }}>
-                    Maintenance Fee
-                  </div>
-                  <div style={{ width: '60%', padding: '8px 12px', fontWeight: 700 }}>
-                    <span
-                      style={{
-                        border: '1.5px solid #111827',
-                        borderRadius: '16px',
-                        padding: '2px 10px',
-                        display: 'inline-block',
-                      }}
-                    >
-                      {Number(selectedInvoice.maintenanceAmount).toFixed(0)}/=
-                    </span>
-                  </div>
-                </div>
-
-                {/* ── Itemized Individual Room Breakdown (Prompt Specification 2 & 3) ── */}
-                {roomItems.length > 0 && (
-                  <div style={{ borderBottom: '1px solid #111827', background: '#f9fafb', padding: '10px 14px' }}>
-                    <div style={{ fontWeight: 700, fontSize: '11px', textTransform: 'uppercase', marginBottom: '6px', color: '#374151' }}>
-                      Detailed Individual Room Schedule (Maintenance Rate × Area)
-                    </div>
-                    <table style={{ width: '100%', fontSize: '11.5px', borderCollapse: 'collapse', textAlign: 'left' }}>
-                      <thead>
-                        <tr style={{ borderBottom: '1px solid #9ca3af', fontWeight: 700 }}>
-                          <th style={{ padding: '4px 6px' }}>Room</th>
-                          <th style={{ padding: '4px 6px' }}>Type</th>
-                          <th style={{ padding: '4px 6px', textAlign: 'right' }}>Area (Sq.Ft.)</th>
-                          <th style={{ padding: '4px 6px', textAlign: 'right' }}>Rate / Sq.Ft.</th>
-                          <th style={{ padding: '4px 6px', textAlign: 'right' }}>Monthly Charge</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {roomItems.map((r: any) => (
-                          <tr key={r.id} style={{ borderBottom: '1px dashed #d1d5db' }}>
-                            <td style={{ padding: '4px 6px', fontWeight: 600 }}>{r.roomName || r.description}</td>
-                            <td style={{ padding: '4px 6px' }}>{r.roomType ? r.roomType.replace('_', ' ') : 'Room'}</td>
-                            <td style={{ padding: '4px 6px', textAlign: 'right' }}>{Number(r.quantity)} sq. ft.</td>
-                            <td style={{ padding: '4px 6px', textAlign: 'right' }}>Rs. {Number(r.unitRate).toFixed(2)}</td>
-                            <td style={{ padding: '4px 6px', textAlign: 'right', fontWeight: 700 }}>
-                              Rs. {Number(r.amount).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                            </td>
-                          </tr>
-                        ))}
-                        <tr style={{ fontWeight: 800, borderTop: '1px solid #111827' }}>
-                          <td colSpan={2} style={{ padding: '6px' }}>
-                            Total ({selectedInvoice.apartmentAreaSqft} sq. ft.)
-                          </td>
-                          <td style={{ padding: '6px', textAlign: 'right' }}>
-                            {selectedInvoice.apartmentAreaSqft} sq. ft.
-                          </td>
-                          <td></td>
-                          <td style={{ padding: '6px', textAlign: 'right' }}>
-                            Rs. {Number(selectedInvoice.maintenanceAmount).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                          </td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-
-                {/* ── Other Additional Charges (Electricity, Parking, etc.) ── */}
-                {otherChargeItems.length > 0 && (
-                  <div style={{ borderBottom: '1px solid #111827', background: '#fdfdfd', padding: '8px 14px' }}>
-                    <div style={{ fontWeight: 700, fontSize: '11px', textTransform: 'uppercase', marginBottom: '4px', color: '#4b5563' }}>
-                      Additional Charges (Utilities / Common Services)
-                    </div>
-                    {otherChargeItems.map((it: any) => (
-                      <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11.5px', padding: '2px 0' }}>
-                        <span>{it.description}</span>
-                        <span style={{ fontWeight: 600 }}>Rs. {Number(it.amount).toFixed(2)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* Sub-Header: Water Bill Details */}
-                <div
-                  style={{
-                    borderBottom: '1px solid #111827',
-                    padding: '6px 12px',
-                    fontWeight: 700,
-                    fontSize: '12px',
-                    background: '#f3f4f6',
-                  }}
-                >
-                  Water Bill Details
-                </div>
-
-                {/* Row: Present Meter Reading */}
-                <div style={{ display: 'flex', borderBottom: '1px solid #111827' }}>
-                  <div style={{ width: '40%', padding: '6px 12px', borderRight: '1px solid #111827' }}>
-                    Present Meter Reading
-                  </div>
-                  <div style={{ width: '60%', padding: '6px 12px' }}>
-                    {selectedInvoice.waterReading?.currentReading ?? '-'}
-                  </div>
-                </div>
-
-                {/* Row: Previous Meter Reading */}
-                <div style={{ display: 'flex', borderBottom: '1px solid #111827' }}>
-                  <div style={{ width: '40%', padding: '6px 12px', borderRight: '1px solid #111827' }}>
-                    Previous Meter Reading
-                  </div>
-                  <div style={{ width: '60%', padding: '6px 12px' }}>
-                    {selectedInvoice.waterReading?.previousReading ?? '-'}
-                  </div>
-                </div>
-
-                {/* Row: Units for the Month */}
-                <div style={{ display: 'flex', borderBottom: '1px solid #111827' }}>
-                  <div style={{ width: '40%', padding: '6px 12px', borderRight: '1px solid #111827' }}>
-                    Units for the Month
-                  </div>
-                  <div style={{ width: '60%', padding: '6px 12px' }}>
-                    {selectedInvoice.waterReading?.consumption ?? (Number(selectedInvoice.waterAmount) > 0 ? 'Metered' : '0')}
-                  </div>
-                </div>
-
-                {/* Row: Water bill for last month */}
-                <div style={{ display: 'flex', borderBottom: '1px solid #111827' }}>
-                  <div style={{ width: '40%', padding: '6px 12px', borderRight: '1px solid #111827' }}>
-                    Water bill for last month
-                  </div>
-                  <div style={{ width: '60%', padding: '6px 12px', fontWeight: 600 }}>
-                    {Number(selectedInvoice.waterAmount) > 0 ? `${Number(selectedInvoice.waterAmount).toFixed(0)}/=` : '0/='}
-                  </div>
-                </div>
-
-                {/* Row: Total Dues to be Paid */}
-                <div style={{ display: 'flex', borderBottom: '2px solid #111827', background: '#f9fafb' }}>
-                  <div style={{ width: '40%', padding: '10px 12px', fontWeight: 800, fontSize: '13px', borderRight: '1px solid #111827' }}>
-                    Total Dues to be Paid
-                  </div>
-                  <div style={{ width: '60%', padding: '10px 12px', fontWeight: 800, fontSize: '13px' }}>
-                    {Number(selectedInvoice.totalDue).toFixed(2).replace('.', '/')}
-                  </div>
-                </div>
-
-                {/* Sub-Header: Bank Account Details */}
-                <div
-                  style={{
-                    borderBottom: '1px solid #111827',
-                    padding: '6px 12px',
-                    textAlign: 'center',
-                    fontWeight: 700,
-                    fontSize: '12px',
-                    background: '#f3f4f6',
-                  }}
-                >
-                  Bank Account Details
-                </div>
-
-                {/* Row: Account Name */}
-                <div style={{ display: 'flex', borderBottom: '1px solid #111827' }}>
-                  <div style={{ width: '40%', padding: '6px 12px', borderRight: '1px solid #111827' }}>
-                    Account Name
-                  </div>
-                  <div style={{ width: '60%', padding: '6px 12px', fontWeight: 600 }}>
-                    {accountName}
-                  </div>
-                </div>
-
-                {/* Row: Account Number */}
-                <div style={{ display: 'flex', borderBottom: '1px solid #111827' }}>
-                  <div style={{ width: '40%', padding: '6px 12px', borderRight: '1px solid #111827' }}>
-                    Account Number
-                  </div>
-                  <div style={{ width: '60%', padding: '6px 12px', fontWeight: 700, letterSpacing: '0.5px' }}>
-                    {accountNumber}
-                  </div>
-                </div>
-
-                {/* Row: Bank */}
-                <div style={{ display: 'flex', borderBottom: '1px solid #111827' }}>
-                  <div style={{ width: '40%', padding: '6px 12px', borderRight: '1px solid #111827' }}>
-                    Bank
-                  </div>
-                  <div style={{ width: '60%', padding: '6px 12px' }}>
-                    {bankName}
-                  </div>
-                </div>
-
-                {/* Row: Branch */}
-                <div style={{ display: 'flex' }}>
-                  <div style={{ width: '40%', padding: '6px 12px', borderRight: '1px solid #111827' }}>
-                    Branch
-                  </div>
-                  <div style={{ width: '60%', padding: '6px 12px' }}>
-                    {branchName}
-                  </div>
-                </div>
-              </div>
-
-              {/* ── Remittance & SGM Resolution Legal Notice (Exact Photo Wording) ── */}
-              <div style={{ marginTop: '16px', fontSize: '11.5px', lineHeight: 1.5, color: '#1f2937' }}>
-                <p style={{ margin: '0 0 10px 0' }}>
-                  Kindly settle the total dues before the end of the month to the mentioned bank account. Please ensure that you include your <strong>apartment number</strong> as the payment narration.
-                </p>
-
-                <p style={{ margin: '0 0 10px 0' }}>
-                  Please note that as per a decision taken at the SGM held on 2nd November 2025, a <strong>15% Monthly Penalty</strong> will be imposed on the outstanding dues of the maintenance fees and water bills. The penalty amount will be calculated on a pro rata basis for the period that the dues are outstanding, and will be added to the following month's maintenance fee and water bill for settlement.
-                </p>
-
-                <p style={{ margin: '0 0 10px 0' }}>
-                  <strong><u>Example:</u></strong><br />
-                  If the outstanding amount due is Rs 20,000/-, the monthly penalty of 15% will be Rs 3000/- . If the amount is settled in 10 days, the penalty payable will be 3000/30 x 10 = Rs 1000/-.
-                </p>
-
-                <p style={{ margin: '0 0 10px 0' }}>
-                  The above decision will be implemented with effect from <strong>1st December 2025</strong>.
-                </p>
-
-                <p style={{ margin: '0 0 10px 0' }}>
-                  After completing the payment, send the payment slip to <strong>{contactEmail}</strong> or WhatsApp it to <strong>{contactPerson} ({contactPhone})</strong>
-                </p>
-
-                <p style={{ margin: '12px 0 0 0', fontWeight: 700 }}>
-                  Thank you for your cooperation.
-                </p>
-              </div>
+            {/* ─── AUTHENTIC BILL SHEET (IDENTICAL FORMAT TO DOWNLOADED PDF) ─── */}
+            <div style={{ maxHeight: '75vh', overflowY: 'auto', padding: 'var(--space-2)' }}>
+              <OfficialBillView invoice={selectedInvoice} forwardedRef={printRef} />
             </div>
 
             <div className="no-print" style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--space-4)' }}>
@@ -910,4 +1047,102 @@ export default function InvoicesPage() {
       )}
     </div>
   );
+
+  // Helper row renderer
+  function renderInvoiceRow(inv: Invoice) {
+    const bal = Number(inv.balanceDue);
+    return (
+      <tr
+        key={inv.id}
+        style={{
+          borderBottom: '1px solid var(--color-border-subtle)',
+          transition: 'background 0.15s ease',
+        }}
+      >
+        <td style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 600, color: 'var(--color-text-primary)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <FileText size={14} color="var(--color-brand-400)" />
+            <span>{inv.invoiceNumber}</span>
+          </div>
+        </td>
+        <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
+          <div style={{ fontWeight: 700, color: 'var(--color-text-primary)' }}>
+            Unit {inv.apartment.unitNumber} {inv.apartment.tower ? `(${inv.apartment.tower.name})` : ''}
+          </div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--color-text-secondary)' }}>
+            {inv.apartment.ownerName || inv.apartment.residentName || '-'}
+          </div>
+        </td>
+        <td style={{ padding: 'var(--space-3) var(--space-4)', fontSize: '0.85rem' }}>
+          {inv.periodCode}
+        </td>
+        <td style={{ padding: 'var(--space-3) var(--space-4)', fontSize: '0.85rem' }}>
+          {new Date(inv.dueDate).toLocaleDateString()}
+        </td>
+        <td style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right', fontWeight: 700 }}>
+          Rs. {Number(inv.totalDue).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+        </td>
+        <td style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right', color: 'var(--color-success-500)', fontWeight: 600 }}>
+          Rs. {Number(inv.paidAmount).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+        </td>
+        <td style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right', fontWeight: 800 }}>
+          {bal > 0 ? (
+            <span style={{ color: 'var(--color-danger-500)' }}>
+              Rs. {bal.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+            </span>
+          ) : (
+            <span style={{ color: 'var(--color-success-500)' }}>Rs. 0.00</span>
+          )}
+        </td>
+        <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
+          <span
+            className={`badge ${
+              inv.status === 'PAID'
+                ? 'badge-success'
+                : inv.status === 'ISSUED'
+                ? 'badge-primary'
+                : inv.status === 'PARTIALLY_PAID'
+                ? 'badge-warning'
+                : inv.status === 'OVERDUE'
+                ? 'badge-danger'
+                : 'badge-outline'
+            }`}
+            style={{ fontSize: '0.7rem' }}
+          >
+            {inv.status}
+          </span>
+        </td>
+        <td style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'center' }}>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: '6px' }}>
+            <button
+              className="btn-ghost"
+              title="View Span Tower IX Bill Breakdown"
+              onClick={() => handleView(inv)}
+              style={{ padding: '6px' }}
+            >
+              <Eye size={15} color="var(--color-brand-400)" />
+            </button>
+            <button
+              className="btn-ghost"
+              title="Download Official PDF Bill"
+              onClick={() => downloadPdf(inv.id)}
+              style={{ padding: '6px' }}
+            >
+              <Download size={15} color="var(--color-text-secondary)" />
+            </button>
+            {canManage && inv.status !== 'DRAFT' && inv.status !== 'VOID' && (
+              <button
+                className="btn-ghost"
+                title="Auditable Financial Adjustment"
+                onClick={() => openAdjustModal(inv)}
+                style={{ padding: '6px' }}
+              >
+                <Sliders size={15} color="var(--color-accent-400)" />
+              </button>
+            )}
+          </div>
+        </td>
+      </tr>
+    );
+  }
 }

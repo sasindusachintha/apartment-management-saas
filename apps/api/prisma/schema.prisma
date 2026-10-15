@@ -496,6 +496,7 @@ model Apartment {
   unitNumber     String          @map("unit_number")
   floor          Int             @default(1)
   areaSqft       Decimal         @map("area_sqft") @db.Decimal(10, 2)
+  roomCount      Int             @default(1) @map("room_count")
   status         ApartmentStatus @default(ACTIVE)
   ownerId        String?         @map("owner_id")
   residentId     String?         @map("resident_id")

@@ -42,6 +42,12 @@ export class CreateApartmentDto {
   @IsPositive()
   areaSqft!: number;
 
+  @ApiPropertyOptional({ description: 'Number of rooms', example: 2, default: 1 })
+  @IsNumber()
+  @Min(1)
+  @IsOptional()
+  roomCount?: number = 1;
+
   @ApiPropertyOptional({ enum: ApartmentStatus, default: ApartmentStatus.ACTIVE })
   @IsEnum(ApartmentStatus)
   @IsOptional()

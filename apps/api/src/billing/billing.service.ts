@@ -236,13 +236,15 @@ export class BillingService {
         { apartment: { unitNumber: { contains: term } } },
         { apartment: { ownerName: { contains: term } } },
         { apartment: { residentName: { contains: term } } },
+        { apartment: { owner: { name: { contains: term } } } },
+        { apartment: { resident: { name: { contains: term } } } },
       ];
     }
 
     return this.prisma.apartmentInvoice.findMany({
       where,
       include: {
-        apartment: { select: { id: true, unitNumber: true, floor: true, ownerName: true, residentName: true, areaSqft: true } },
+        apartment: { select: { id: true, unitNumber: true, floor: true, ownerName: true, residentName: true, areaSqft: true, tower: { select: { id: true, name: true } } } },
         building: { select: { id: true, name: true } },
         billingPeriod: { select: { id: true, name: true, periodCode: true } },
       },
@@ -539,6 +541,7 @@ export class BillingService {
     const invoice = await this.prisma.$transaction(async (tx) => {
       let inv;
       if (existing) {
+        await tx.invoiceItem.deleteMany({ where: { invoiceId: existing.id } });
         inv = await tx.apartmentInvoice.update({
           where: { id: existing.id },
           data: {

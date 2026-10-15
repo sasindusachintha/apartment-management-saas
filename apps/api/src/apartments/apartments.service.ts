@@ -292,7 +292,7 @@ export class ApartmentsService {
       return {
         ...rest,
         effectiveAreaSqft: effectiveArea,
-        roomsCount: apt.rooms.length,
+        roomsCount: (apt as any).roomCount ?? (apt.rooms.length > 0 ? apt.rooms.length : 1),
         outstandingArrears: totalArrears,
       };
     });
@@ -380,6 +380,7 @@ export class ApartmentsService {
     return {
       ...apartment,
       rooms: roomsWithCalculations,
+      roomsCount: (apartment as any).roomCount ?? (apartment.rooms.length > 0 ? apartment.rooms.length : 1),
       totalRoomArea: apartment.rooms.length > 0 ? totalRoomArea : apartment.areaSqft,
       totalRoomCharge: apartment.rooms.length > 0 ? totalRoomCharge : apartment.areaSqft.times(defaultRate),
       outstandingArrears: totalArrears,
@@ -430,6 +431,7 @@ export class ApartmentsService {
         unitNumber: dto.unitNumber.trim(),
         floor: dto.floor ?? 1,
         areaSqft: new Prisma.Decimal(dto.areaSqft),
+        roomCount: dto.roomCount !== undefined ? Number(dto.roomCount) : 1,
         status: dto.status ?? 'ACTIVE',
         ownerId: dto.ownerId ?? null,
         residentId: dto.residentId ?? null,
@@ -493,6 +495,7 @@ export class ApartmentsService {
     if (dto.unitNumber !== undefined) data.unitNumber = dto.unitNumber.trim();
     if (dto.floor !== undefined) data.floor = dto.floor;
     if (dto.areaSqft !== undefined) data.areaSqft = new Prisma.Decimal(dto.areaSqft);
+    if (dto.roomCount !== undefined) (data as any).roomCount = Number(dto.roomCount);
     if (dto.status !== undefined) data.status = dto.status;
     if (dto.ownerId !== undefined) {
       data.owner = dto.ownerId ? { connect: { id: dto.ownerId } } : { disconnect: true };
@@ -737,6 +740,7 @@ export class ApartmentsService {
     return {
       ...apartment,
       rooms: roomsWithCalculations,
+      roomsCount: (apartment as any).roomCount ?? (apartment.rooms.length > 0 ? apartment.rooms.length : 1),
       totalRoomArea: apartment.rooms.length > 0 ? totalRoomArea : apartment.areaSqft,
       totalRoomCharge:
         apartment.rooms.length > 0 ? totalRoomCharge : apartment.areaSqft.times(defaultRate),
@@ -864,7 +868,7 @@ export class ApartmentsService {
         ...rest,
         computedStatus,
         effectiveAreaSqft: effectiveArea,
-        roomsCount: apt.rooms.length,
+        roomsCount: (apt as any).roomCount ?? (apt.rooms.length > 0 ? apt.rooms.length : 1),
         outstandingArrears: arrears,
       };
     });
@@ -1120,7 +1124,10 @@ export class ApartmentsService {
       const sumArea = activeRooms.reduce((sum, r) => sum.plus(r.areaSqft), new Prisma.Decimal(0));
       await this.prisma.apartment.update({
         where: { id: apartmentId },
-        data: { areaSqft: sumArea },
+        data: {
+          areaSqft: sumArea,
+          roomCount: activeRooms.length,
+        } as any,
       });
     }
   }

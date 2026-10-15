@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api';
 import { useAuth } from '../../context/AuthContext';
 import {
   Plus,
   Search,
   AlertCircle,
+  CheckCircle2,
   Loader2,
   Home,
   Eye,
@@ -14,7 +14,6 @@ import {
   X,
   Layers,
   Building as BuildingIcon,
-  Calculator,
 } from 'lucide-react';
 
 interface Tower {
@@ -27,23 +26,12 @@ interface Tower {
   _count?: { apartments: number };
 }
 
-interface ApartmentRoom {
-  id: string;
-  roomNumber: string;
-  roomType: 'BEDROOM' | 'LIVING_ROOM' | 'KITCHEN' | 'BATHROOM' | 'BALCONY' | 'STORAGE' | 'OTHER';
-  areaSqft: number | string;
-  maintenanceRate?: number | string | null;
-  applicableRate?: number | string;
-  monthlyCharge?: number | string;
-  isActive: boolean;
-  notes?: string | null;
-}
-
 interface Apartment {
   id: string;
   unitNumber: string;
   floor: number;
   areaSqft: number | string;
+  roomCount?: number;
   status: string;
   isActive: boolean;
   ownerName?: string | null;
@@ -56,7 +44,7 @@ interface Apartment {
   buildingId: string;
   towerId?: string | null;
   tower?: Tower | null;
-  rooms?: ApartmentRoom[];
+  rooms?: Array<{ id: string; roomNumber: string; roomType: string; areaSqft: number | string }>;
   _count?: { rooms: number };
   building?: { id: string; name: string; address: string };
   outstandingArrears?: number | string;
@@ -67,19 +55,8 @@ interface Building {
   name: string;
 }
 
-const ROOM_TYPES = [
-  { value: 'BEDROOM', label: 'Bedroom' },
-  { value: 'LIVING_ROOM', label: 'Living Room' },
-  { value: 'KITCHEN', label: 'Kitchen' },
-  { value: 'BATHROOM', label: 'Bathroom' },
-  { value: 'BALCONY', label: 'Balcony' },
-  { value: 'STORAGE', label: 'Storage' },
-  { value: 'OTHER', label: 'Other Room' },
-];
-
 export default function ApartmentsPage() {
   const { activeOrg, hasPermission } = useAuth();
-  const navigate = useNavigate();
 
   const [apartments, setApartments] = useState<Apartment[]>([]);
   const [buildings, setBuildings] = useState<Building[]>([]);
@@ -91,39 +68,18 @@ export default function ApartmentsPage() {
   const [statusFilter, setStatusFilter] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  // Modal States
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [showEditModal, setShowEditModal] = useState(false);
+  // Unified Modal States
+  const [showModal, setShowModal] = useState(false);
+  const [modalMode, setModalMode] = useState<'add' | 'edit'>('add');
   const [showViewModal, setShowViewModal] = useState(false);
-  const [showRoomsModal, setShowRoomsModal] = useState(false);
   const [showTowersModal, setShowTowersModal] = useState(false);
+  const [deactivateTarget, setDeactivateTarget] = useState<Apartment | null>(null);
 
   const [selectedApartment, setSelectedApartment] = useState<Apartment | null>(null);
-  const [apartmentDetails, setApartmentDetails] = useState<any | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
-
-  // Rooms Management State
-  const [roomsData, setRoomsData] = useState<{
-    apartmentId: string;
-    unitNumber: string;
-    defaultRate: number;
-    rooms: ApartmentRoom[];
-    totalArea: number;
-    totalCharge: number;
-  } | null>(null);
-  const [isLoadingRooms, setIsLoadingRooms] = useState(false);
-  const [editingRoom, setEditingRoom] = useState<ApartmentRoom | null>(null);
-
-  // New Room Form
-  const [roomForm, setRoomForm] = useState({
-    roomNumber: '',
-    roomType: 'BEDROOM' as ApartmentRoom['roomType'],
-    areaSqft: 150,
-    maintenanceRate: '', // empty means inherit apartment default
-    notes: '',
-  });
 
   // New Tower Form
   const [towerForm, setTowerForm] = useState({
@@ -133,12 +89,13 @@ export default function ApartmentsPage() {
     description: '',
   });
 
-  // Apartment Add/Edit Form State
+  // Unified Apartment Add/Edit Form State
   const [formData, setFormData] = useState({
     unitNumber: '',
     floor: 1,
     towerId: '',
     areaSqft: 1000,
+    roomCount: 2,
     status: 'ACTIVE',
     buildingId: '',
     ownerName: '',
@@ -151,6 +108,14 @@ export default function ApartmentsPage() {
   });
 
   const canManage = hasPermission('apartments.manage');
+
+  // Auto-clear feedback toast after 5s
+  useEffect(() => {
+    if (feedback) {
+      const timer = setTimeout(() => setFeedback(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [feedback]);
 
   // Fetch Buildings
   const fetchBuildings = useCallback(async () => {
@@ -217,137 +182,157 @@ export default function ApartmentsPage() {
     fetchApartments();
   }, [fetchApartments]);
 
-  // Load Rooms for a selected apartment
-  const loadApartmentRooms = async (aptId: string) => {
-    setIsLoadingRooms(true);
-    try {
-      const { data } = await api.get(`/apartments/${aptId}/rooms`);
-      setRoomsData(data);
-    } catch (err: unknown) {
-      const msg =
-        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
-        'Failed to load apartment rooms';
-      setModalError(msg);
-    } finally {
-      setIsLoadingRooms(false);
-    }
-  };
-
-  const openRoomsModal = (apt: Apartment) => {
-    setSelectedApartment(apt);
-    setEditingRoom(null);
-    setRoomForm({
-      roomNumber: '',
-      roomType: 'BEDROOM',
-      areaSqft: 150,
-      maintenanceRate: '',
+  // Open Add Modal
+  const openAddModal = () => {
+    setModalMode('add');
+    setSelectedApartment(null);
+    setFormData({
+      unitNumber: '',
+      floor: 1,
+      towerId: selectedTowerId || '',
+      areaSqft: 1000,
+      roomCount: 2,
+      status: 'ACTIVE',
+      buildingId: selectedBuildingId || (buildings[0]?.id ?? ''),
+      ownerName: '',
+      ownerEmail: '',
+      ownerPhone: '',
+      residentName: '',
+      residentEmail: '',
+      residentPhone: '',
       notes: '',
     });
     setModalError(null);
-    setShowRoomsModal(true);
-    loadApartmentRooms(apt.id);
+    setShowModal(true);
   };
 
-  // Immediate Live Room Calculation for Add/Edit
-  const previewAddCharge = useMemo(() => {
-    const area = Number(roomForm.areaSqft) || 0;
-    const defaultRate = Number(roomsData?.defaultRate ?? 10);
-    const rate = roomForm.maintenanceRate !== '' ? Number(roomForm.maintenanceRate) : defaultRate;
-    return area * rate;
-  }, [roomForm.areaSqft, roomForm.maintenanceRate, roomsData?.defaultRate]);
+  // Open Edit Modal
+  const openEditModal = (apt: Apartment) => {
+    setModalMode('edit');
+    setSelectedApartment(apt);
+    setFormData({
+      unitNumber: apt.unitNumber,
+      floor: apt.floor,
+      towerId: apt.towerId || '',
+      areaSqft: Number(apt.areaSqft),
+      roomCount: apt.roomCount ?? (apt._count?.rooms || apt.rooms?.length || 2),
+      status: apt.status,
+      buildingId: apt.buildingId,
+      ownerName: apt.ownerName || '',
+      ownerEmail: apt.ownerEmail || '',
+      ownerPhone: apt.ownerPhone || '',
+      residentName: apt.residentName || '',
+      residentEmail: apt.residentEmail || '',
+      residentPhone: apt.residentPhone || '',
+      notes: apt.notes || '',
+    });
+    setModalError(null);
+    setShowModal(true);
+  };
 
-  // Add Room
-  const handleAddRoom = async (e: React.FormEvent) => {
+  // Handle Save (Add or Edit)
+  const handleSaveApartment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedApartment || !activeOrg?.id) return;
-    if (!roomForm.roomNumber.trim() || Number(roomForm.areaSqft) <= 0) {
-      setModalError('Please enter a valid room name and positive area in square feet');
+    if (!activeOrg?.id) return;
+
+    if (!formData.unitNumber.trim()) {
+      setModalError('Apartment / Unit number is required');
+      return;
+    }
+    if (!formData.areaSqft || Number(formData.areaSqft) <= 0) {
+      setModalError('Please enter a valid floor area in square feet');
+      return;
+    }
+    if (!formData.roomCount || Number(formData.roomCount) < 1) {
+      setModalError('Room count must be at least 1');
+      return;
+    }
+
+    const bldgId = formData.buildingId || selectedBuildingId;
+    if (!bldgId) {
+      setModalError('Please select a building');
       return;
     }
 
     setIsSubmitting(true);
     setModalError(null);
     try {
-      await api.post('/apartments/rooms', {
-        organizationId: activeOrg.id,
-        buildingId: selectedApartment.buildingId,
-        apartmentId: selectedApartment.id,
-        roomNumber: roomForm.roomNumber.trim(),
-        roomType: roomForm.roomType,
-        areaSqft: Number(roomForm.areaSqft),
-        maintenanceRate: roomForm.maintenanceRate !== '' ? Number(roomForm.maintenanceRate) : undefined,
-        notes: roomForm.notes || undefined,
-      });
+      if (modalMode === 'add') {
+        await api.post('/apartments', {
+          organizationId: activeOrg.id,
+          buildingId: bldgId,
+          towerId: formData.towerId || undefined,
+          unitNumber: formData.unitNumber.trim(),
+          floor: Number(formData.floor),
+          areaSqft: Number(formData.areaSqft),
+          roomCount: Number(formData.roomCount),
+          status: formData.status,
+          ownerName: formData.ownerName.trim() || undefined,
+          ownerEmail: formData.ownerEmail.trim() || undefined,
+          ownerPhone: formData.ownerPhone.trim() || undefined,
+          residentName: formData.residentName.trim() || formData.ownerName.trim() || undefined,
+          residentEmail: formData.residentEmail.trim() || formData.ownerEmail.trim() || undefined,
+          residentPhone: formData.residentPhone.trim() || formData.ownerPhone.trim() || undefined,
+          notes: formData.notes.trim() || undefined,
+        });
 
-      setRoomForm({
-        roomNumber: '',
-        roomType: 'BEDROOM',
-        areaSqft: 120,
-        maintenanceRate: '',
-        notes: '',
-      });
+        setFeedback({ type: 'success', message: `Apartment unit "${formData.unitNumber}" successfully created.` });
+      } else {
+        if (!selectedApartment) return;
+        await api.patch(`/apartments/${selectedApartment.id}`, {
+          unitNumber: formData.unitNumber.trim(),
+          floor: Number(formData.floor),
+          towerId: formData.towerId || null,
+          areaSqft: Number(formData.areaSqft),
+          roomCount: Number(formData.roomCount),
+          status: formData.status,
+          ownerName: formData.ownerName.trim() || null,
+          ownerEmail: formData.ownerEmail.trim() || null,
+          ownerPhone: formData.ownerPhone.trim() || null,
+          residentName: formData.residentName.trim() || null,
+          residentEmail: formData.residentEmail.trim() || null,
+          residentPhone: formData.residentPhone.trim() || null,
+          notes: formData.notes.trim() || null,
+        });
 
-      await loadApartmentRooms(selectedApartment.id);
-      fetchApartments(); // Sync apartment total area in main table
+        setFeedback({ type: 'success', message: `Apartment unit "${formData.unitNumber}" updated successfully.` });
+      }
+
+      setShowModal(false);
+      setSelectedApartment(null);
+      fetchApartments();
     } catch (err: unknown) {
       const msg =
-        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
-        'Failed to add room';
-      setModalError(msg);
+        (err as { response?: { data?: { message?: string | string[] } } })?.response?.data?.message ||
+        'Failed to save apartment unit';
+      setModalError(Array.isArray(msg) ? msg.join(', ') : msg);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // Update Room
-  const handleUpdateRoom = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingRoom || !selectedApartment) return;
+  // View Detailed Apartment Record
+  const openViewModal = (apt: Apartment) => {
+    setSelectedApartment(apt);
+    setShowViewModal(true);
+  };
 
+  // Confirm Deactivate
+  const handleConfirmDeactivate = async () => {
+    if (!deactivateTarget) return;
     setIsSubmitting(true);
-    setModalError(null);
     try {
-      await api.patch(`/apartments/rooms/${editingRoom.id}`, {
-        roomNumber: editingRoom.roomNumber.trim(),
-        roomType: editingRoom.roomType,
-        areaSqft: Number(editingRoom.areaSqft),
-        maintenanceRate:
-          editingRoom.maintenanceRate !== '' && editingRoom.maintenanceRate !== null
-            ? Number(editingRoom.maintenanceRate)
-            : null,
-        isActive: editingRoom.isActive,
-        notes: editingRoom.notes || null,
-      });
-
-      setEditingRoom(null);
-      await loadApartmentRooms(selectedApartment.id);
+      await api.delete(`/apartments/${deactivateTarget.id}`);
+      setFeedback({ type: 'success', message: `Apartment unit "${deactivateTarget.unitNumber}" deactivated successfully.` });
+      setDeactivateTarget(null);
       fetchApartments();
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
-        'Failed to update room';
-      setModalError(msg);
+        'Failed to deactivate apartment';
+      setFeedback({ type: 'error', message: msg });
     } finally {
       setIsSubmitting(false);
-    }
-  };
-
-  // Delete Room
-  const handleDeleteRoom = async (roomId: string, roomName: string) => {
-    if (!window.confirm(`Are you sure you want to deactivate room "${roomName}"? Existing bill snapshots will remain preserved.`)) {
-      return;
-    }
-    if (!selectedApartment) return;
-
-    try {
-      await api.delete(`/apartments/rooms/${roomId}`);
-      await loadApartmentRooms(selectedApartment.id);
-      fetchApartments();
-    } catch (err: unknown) {
-      alert(
-        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
-          'Failed to deactivate room',
-      );
     }
   };
 
@@ -374,6 +359,7 @@ export default function ApartmentsPage() {
 
       setTowerForm({ name: '', code: '', totalFloors: 10, description: '' });
       fetchTowers();
+      setFeedback({ type: 'success', message: `Tower "${towerForm.name}" created successfully.` });
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
@@ -384,162 +370,7 @@ export default function ApartmentsPage() {
     }
   };
 
-  // Handle Create Apartment
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!activeOrg?.id) return;
-    if (!formData.unitNumber || !formData.areaSqft) {
-      setModalError('Please enter Apartment Number and Floor Area');
-      return;
-    }
-
-    const bldgId = formData.buildingId || selectedBuildingId;
-    if (!bldgId) {
-      setModalError('Please select a building');
-      return;
-    }
-
-    setIsSubmitting(true);
-    setModalError(null);
-    try {
-      await api.post('/apartments', {
-        organizationId: activeOrg.id,
-        buildingId: bldgId,
-        towerId: formData.towerId || undefined,
-        unitNumber: formData.unitNumber,
-        floor: Number(formData.floor),
-        areaSqft: Number(formData.areaSqft),
-        status: formData.status,
-        ownerName: formData.ownerName || undefined,
-        ownerEmail: formData.ownerEmail || undefined,
-        ownerPhone: formData.ownerPhone || undefined,
-        residentName: formData.residentName || formData.ownerName || undefined,
-        residentEmail: formData.residentEmail || formData.ownerEmail || undefined,
-        residentPhone: formData.residentPhone || formData.ownerPhone || undefined,
-        notes: formData.notes || undefined,
-      });
-
-      setShowAddModal(false);
-      resetForm();
-      fetchApartments();
-    } catch (err: unknown) {
-      const msg =
-        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
-        'Failed to create apartment';
-      setModalError(msg);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  // Handle Edit Apartment
-  const handleUpdate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedApartment) return;
-
-    setIsSubmitting(true);
-    setModalError(null);
-    try {
-      await api.patch(`/apartments/${selectedApartment.id}`, {
-        unitNumber: formData.unitNumber,
-        floor: Number(formData.floor),
-        towerId: formData.towerId || null,
-        areaSqft: Number(formData.areaSqft),
-        status: formData.status,
-        ownerName: formData.ownerName || null,
-        ownerEmail: formData.ownerEmail || null,
-        ownerPhone: formData.ownerPhone || null,
-        residentName: formData.residentName || null,
-        residentEmail: formData.residentEmail || null,
-        residentPhone: formData.residentPhone || null,
-        notes: formData.notes || null,
-      });
-
-      setShowEditModal(false);
-      setSelectedApartment(null);
-      resetForm();
-      fetchApartments();
-    } catch (err: unknown) {
-      const msg =
-        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
-        'Failed to update apartment';
-      setModalError(msg);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  // Open Edit Modal
-  const openEditModal = (apt: Apartment) => {
-    setSelectedApartment(apt);
-    setFormData({
-      unitNumber: apt.unitNumber,
-      floor: apt.floor,
-      towerId: apt.towerId || '',
-      areaSqft: Number(apt.areaSqft),
-      status: apt.status,
-      buildingId: apt.buildingId,
-      ownerName: apt.ownerName || '',
-      ownerEmail: apt.ownerEmail || '',
-      ownerPhone: apt.ownerPhone || '',
-      residentName: apt.residentName || '',
-      residentEmail: apt.residentEmail || '',
-      residentPhone: apt.residentPhone || '',
-      notes: apt.notes || '',
-    });
-    setModalError(null);
-    setShowEditModal(true);
-  };
-
-  // View Detailed Apartment Record
-  const openViewModal = async (apt: Apartment) => {
-    setSelectedApartment(apt);
-    setShowViewModal(true);
-    setApartmentDetails(null);
-    try {
-      const { data } = await api.get(`/apartments/${apt.id}`);
-      setApartmentDetails(data);
-    } catch {
-      setApartmentDetails(apt);
-    }
-  };
-
-  // Deactivate Apartment
-  const handleDeactivate = async (apt: Apartment) => {
-    if (!window.confirm(`Are you sure you want to deactivate Apartment ${apt.unitNumber}?`)) {
-      return;
-    }
-    try {
-      await api.delete(`/apartments/${apt.id}`);
-      fetchApartments();
-    } catch (err: unknown) {
-      alert(
-        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ||
-          'Failed to deactivate apartment',
-      );
-    }
-  };
-
-  const resetForm = () => {
-    setFormData({
-      unitNumber: '',
-      floor: 1,
-      towerId: selectedTowerId,
-      areaSqft: 1000,
-      status: 'ACTIVE',
-      buildingId: selectedBuildingId,
-      ownerName: '',
-      ownerEmail: '',
-      ownerPhone: '',
-      residentName: '',
-      residentEmail: '',
-      residentPhone: '',
-      notes: '',
-    });
-    setModalError(null);
-  };
-
-  // Extract available floor numbers from current apartments or tower
+  // Available floor numbers
   const availableFloors = useMemo(() => {
     const floorsSet = new Set<number>();
     apartments.forEach((a) => {
@@ -575,10 +406,10 @@ export default function ApartmentsPage() {
               color: 'var(--color-text-primary)',
             }}
           >
-            Building Structure & Apartments
+            Apartments Management
           </h2>
           <p style={{ color: 'var(--color-text-secondary)', fontSize: '0.9rem' }}>
-            Apartment Complex → Tower/Block → Floor → Apartment/Unit → Individual Rooms
+            Manage apartment units, room counts, area dimensions, and resident assignments
           </p>
         </div>
 
@@ -595,18 +426,50 @@ export default function ApartmentsPage() {
               <BuildingIcon size={16} /> Manage Towers ({towers.length})
             </button>
             <button
+              id="btn-add-apartment"
               className="btn btn-primary"
               style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-              onClick={() => {
-                resetForm();
-                setShowAddModal(true);
-              }}
+              onClick={openAddModal}
             >
               <Plus size={16} /> Add Apartment
             </button>
           </div>
         )}
       </div>
+
+      {/* ─── TOAST / BANNER FEEDBACK ─────────────────────────── */}
+      {feedback && (
+        <div
+          style={{
+            padding: 'var(--space-3) var(--space-4)',
+            borderRadius: 'var(--radius-md)',
+            background: feedback.type === 'success' ? 'hsl(142, 70%, 12%)' : 'hsl(0, 84%, 12%)',
+            border: `1px solid ${feedback.type === 'success' ? 'var(--color-success-500)' : 'var(--color-danger-500)'}`,
+            color: feedback.type === 'success' ? 'var(--color-success-100)' : 'var(--color-danger-100)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '8px',
+            fontSize: '0.9rem',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {feedback.type === 'success' ? (
+              <CheckCircle2 size={18} color="var(--color-success-500)" />
+            ) : (
+              <AlertCircle size={18} color="var(--color-danger-500)" />
+            )}
+            <span>{feedback.message}</span>
+          </div>
+          <button
+            className="btn-ghost"
+            style={{ padding: '2px', color: 'inherit' }}
+            onClick={() => setFeedback(null)}
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
 
       {/* ─── BUILDING HIERARCHY SELECTOR RIBBON ──────────────── */}
       <div
@@ -621,10 +484,10 @@ export default function ApartmentsPage() {
           border: '1px solid var(--color-border)',
         }}
       >
-        {/* 1. Building Selector */}
+        {/* Complex / Building */}
         <div style={{ minWidth: '200px', flex: 1 }}>
           <label style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--color-text-secondary)', marginBottom: '4px', display: 'block' }}>
-            1. Complex / Building
+            Complex / Building
           </label>
           <select
             className="input"
@@ -644,10 +507,10 @@ export default function ApartmentsPage() {
           </select>
         </div>
 
-        {/* 2. Tower Selector */}
+        {/* Tower Selector */}
         <div style={{ minWidth: '180px', flex: 1 }}>
           <label style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--color-brand-400)', marginBottom: '4px', display: 'block' }}>
-            2. Tower / Block
+            Tower / Block
           </label>
           <select
             className="input"
@@ -667,10 +530,10 @@ export default function ApartmentsPage() {
           </select>
         </div>
 
-        {/* 3. Floor Selector */}
+        {/* Floor Level */}
         <div style={{ minWidth: '140px' }}>
           <label style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--color-brand-400)', marginBottom: '4px', display: 'block' }}>
-            3. Floor Level
+            Floor Level
           </label>
           <select
             className="input"
@@ -710,7 +573,7 @@ export default function ApartmentsPage() {
         {/* Search Input */}
         <div style={{ flex: 2, minWidth: '220px' }}>
           <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-text-secondary)', marginBottom: '4px', display: 'block' }}>
-            Search Apartment or Owner
+            Search Unit or Resident
           </label>
           <div style={{ position: 'relative' }}>
             <Search
@@ -754,14 +617,14 @@ export default function ApartmentsPage() {
         {isLoading ? (
           <div style={{ padding: 'var(--space-12)', textAlign: 'center', color: 'var(--color-text-secondary)' }}>
             <Loader2 className="animate-spin" size={32} style={{ margin: '0 auto var(--space-3)' }} />
-            <p>Loading apartment units and room data...</p>
+            <p>Loading apartment units...</p>
           </div>
         ) : apartments.length === 0 ? (
           <div style={{ padding: 'var(--space-12)', textAlign: 'center', color: 'var(--color-text-muted)' }}>
             <Home size={40} style={{ margin: '0 auto var(--space-3)', opacity: 0.5 }} />
             <p style={{ fontWeight: 600, color: 'var(--color-text-primary)' }}>No apartments found</p>
             <p style={{ fontSize: '0.85rem', marginTop: '4px' }}>
-              Add apartments or configure towers to start managing individual rooms and monthly maintenance bills.
+              Add apartments or adjust your filters to view and manage apartment units.
             </p>
           </div>
         ) : (
@@ -771,7 +634,7 @@ export default function ApartmentsPage() {
                 <tr style={{ background: 'var(--color-surface-2)', borderBottom: '1px solid var(--color-border)' }}>
                   <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Unit No & Tower</th>
                   <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Floor</th>
-                  <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Configured Rooms</th>
+                  <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Rooms</th>
                   <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Total Area (Sq.Ft.)</th>
                   <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Occupant</th>
                   <th style={{ padding: 'var(--space-3) var(--space-4)' }}>Status</th>
@@ -782,7 +645,7 @@ export default function ApartmentsPage() {
               <tbody>
                 {apartments.map((apt) => {
                   const arrearsNum = Number(apt.outstandingArrears ?? 0);
-                  const roomCount = apt._count?.rooms ?? (apt.rooms?.length || 0);
+                  const displayRooms = apt.roomCount ?? (apt._count?.rooms || apt.rooms?.length || 1);
 
                   return (
                     <tr
@@ -821,27 +684,24 @@ export default function ApartmentsPage() {
                         Floor {apt.floor}
                       </td>
 
-                      {/* Configured Rooms Action Button */}
+                      {/* Rooms Concept */}
                       <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
-                        <button
-                          className={`btn ${roomCount > 0 ? 'btn-outline' : 'btn-ghost'}`}
+                        <span
                           style={{
-                            padding: '4px 10px',
-                            fontSize: '0.8rem',
                             display: 'inline-flex',
                             alignItems: 'center',
                             gap: '6px',
+                            padding: '4px 10px',
+                            fontSize: '0.8rem',
+                            fontWeight: 600,
+                            background: 'var(--color-surface-2)',
                             borderRadius: 'var(--radius-full)',
-                            borderColor: roomCount > 0 ? 'var(--color-brand-500)' : 'var(--color-border)',
+                            border: '1px solid var(--color-border)',
                           }}
-                          onClick={() => openRoomsModal(apt)}
-                          title="Manage individual rooms and floor area"
                         >
-                          <Layers size={14} color={roomCount > 0 ? 'var(--color-brand-400)' : 'var(--color-text-muted)'} />
-                          <span style={{ fontWeight: 600 }}>
-                            {roomCount > 0 ? `${roomCount} Rooms` : '+ Add Rooms'}
-                          </span>
-                        </button>
+                          <Layers size={13} color="var(--color-brand-400)" />
+                          {displayRooms} {displayRooms === 1 ? 'Room' : 'Rooms'}
+                        </span>
                       </td>
 
                       {/* Total Area */}
@@ -891,14 +751,6 @@ export default function ApartmentsPage() {
                         <div style={{ display: 'flex', justifyContent: 'center', gap: '6px' }}>
                           <button
                             className="btn-ghost"
-                            title="Open Rooms & Maintenance Breakdown"
-                            onClick={() => openRoomsModal(apt)}
-                            style={{ padding: '6px' }}
-                          >
-                            <Layers size={15} color="var(--color-brand-400)" />
-                          </button>
-                          <button
-                            className="btn-ghost"
                             title="View Unit Details"
                             onClick={() => openViewModal(apt)}
                             style={{ padding: '6px' }}
@@ -909,7 +761,7 @@ export default function ApartmentsPage() {
                             <>
                               <button
                                 className="btn-ghost"
-                                title="Edit Unit"
+                                title="Edit Apartment"
                                 onClick={() => openEditModal(apt)}
                                 style={{ padding: '6px' }}
                               >
@@ -918,7 +770,7 @@ export default function ApartmentsPage() {
                               <button
                                 className="btn-ghost"
                                 title="Deactivate"
-                                onClick={() => handleDeactivate(apt)}
+                                onClick={() => setDeactivateTarget(apt)}
                                 style={{ padding: '6px' }}
                               >
                                 <Trash2 size={15} color="var(--color-danger-500)" />
@@ -936,42 +788,51 @@ export default function ApartmentsPage() {
         )}
       </div>
 
-      {/* ─── 4. INDIVIDUAL ROOMS MANAGEMENT MODAL ───────────── */}
-      {showRoomsModal && selectedApartment && (
-        <div className="modal-backdrop">
-          <div className="modal-content" style={{ maxWidth: '820px', maxHeight: '90vh', overflowY: 'auto' }}>
+      {/* ─── UNIFIED MODERN ADD / EDIT APARTMENT MODAL ───────── */}
+      {showModal && (
+        <div className="modal-backdrop" style={{ zIndex: 1000 }}>
+          <div
+            className="modal-content"
+            style={{
+              maxWidth: '680px',
+              width: '95%',
+              maxHeight: '90vh',
+              overflowY: 'auto',
+              borderRadius: 'var(--radius-xl)',
+            }}
+          >
             {/* Modal Header */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 'var(--space-4)' }}>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: 'var(--space-4)',
+                paddingBottom: 'var(--space-3)',
+                borderBottom: '1px solid var(--color-border)',
+              }}
+            >
               <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                  <Layers size={18} color="var(--color-brand-400)" />
-                  <h3 style={{ fontFamily: 'var(--font-display)', fontWeight: 800, margin: 0 }}>
-                    Apartment {selectedApartment.unitNumber} — Individual Rooms
-                  </h3>
-                </div>
-                <div style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
-                  {selectedApartment.building?.name || 'Condominium'} · {selectedApartment.tower ? `${selectedApartment.tower.name} · ` : ''}Floor {selectedApartment.floor}
-                </div>
+                <h3 style={{ fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: '1.25rem', margin: 0 }}>
+                  {modalMode === 'add' ? 'Add New Apartment Unit' : `Edit Apartment ${formData.unitNumber}`}
+                </h3>
+                <p style={{ color: 'var(--color-text-secondary)', fontSize: '0.85rem', marginTop: '2px', margin: 0 }}>
+                  {modalMode === 'add'
+                    ? 'Fill in apartment specifications, room count, and resident details.'
+                    : 'Update apartment unit information, area specs, and tenant assignment.'}
+                </p>
               </div>
-
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <button
-                  className="btn btn-outline"
-                  style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', padding: '0.4rem 0.75rem' }}
-                  onClick={() => {
-                    setShowRoomsModal(false);
-                    navigate('/dashboard/billing');
-                  }}
-                  title="Generate monthly bill with room breakdown"
-                >
-                  <Calculator size={14} /> Generate Bill
-                </button>
-                <button className="btn-ghost" onClick={() => setShowRoomsModal(false)}>
-                  <X size={18} />
-                </button>
-              </div>
+              <button
+                className="btn-ghost"
+                onClick={() => setShowModal(false)}
+                disabled={isSubmitting}
+                style={{ padding: '6px' }}
+              >
+                <X size={18} />
+              </button>
             </div>
 
+            {/* Error in Modal */}
             {modalError && (
               <div
                 style={{
@@ -982,382 +843,321 @@ export default function ApartmentsPage() {
                   color: 'var(--color-danger-100)',
                   marginBottom: 'var(--space-4)',
                   fontSize: '0.85rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
                 }}
               >
-                {modalError}
+                <AlertCircle size={16} color="var(--color-danger-500)" />
+                <span>{modalError}</span>
               </div>
             )}
 
-            {/* Live Calculation KPI Summary Ribbon */}
-            <div
-              className="grid grid-4"
-              style={{
-                gap: 'var(--space-3)',
-                marginBottom: 'var(--space-4)',
-              }}
-            >
-              <div className="card" style={{ padding: 'var(--space-3)', background: 'var(--color-surface-2)' }}>
-                <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>Configured Rooms</div>
-                <div style={{ fontSize: '1.25rem', fontWeight: 800, color: 'var(--color-text-primary)' }}>
-                  {roomsData?.rooms?.length || 0}
+            <form onSubmit={handleSaveApartment} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+              {/* Complex & Tower Selection */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 'var(--space-3)' }}>
+                <div>
+                  <label className="label" style={{ fontWeight: 600, fontSize: '0.8rem' }}>Building / Complex *</label>
+                  <select
+                    className="input"
+                    value={formData.buildingId}
+                    onChange={(e) => setFormData({ ...formData, buildingId: e.target.value })}
+                    required
+                  >
+                    {buildings.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="label" style={{ fontWeight: 600, fontSize: '0.8rem' }}>Tower / Block</label>
+                  <select
+                    className="input"
+                    value={formData.towerId}
+                    onChange={(e) => setFormData({ ...formData, towerId: e.target.value })}
+                  >
+                    <option value="">No Specific Tower</option>
+                    {towers.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name} {t.code ? `(${t.code})` : ''}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
 
-              <div className="card" style={{ padding: 'var(--space-3)', background: 'var(--color-surface-2)' }}>
-                <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>Total Apartment Area</div>
-                <div style={{ fontSize: '1.25rem', fontWeight: 800, color: 'var(--color-brand-400)' }}>
-                  {Number(roomsData?.totalArea ?? selectedApartment.areaSqft).toLocaleString()} sq. ft.
+              {/* Unit Number, Floor, Area, Room Count, Status */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 'var(--space-3)' }}>
+                <div>
+                  <label className="label" style={{ fontWeight: 600, fontSize: '0.8rem' }}>Unit Number *</label>
+                  <input
+                    type="text"
+                    className="input"
+                    placeholder="e.g. A-101"
+                    value={formData.unitNumber}
+                    onChange={(e) => setFormData({ ...formData, unitNumber: e.target.value })}
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="label" style={{ fontWeight: 600, fontSize: '0.8rem' }}>Floor Level *</label>
+                  <input
+                    type="number"
+                    className="input"
+                    value={formData.floor}
+                    onChange={(e) => setFormData({ ...formData, floor: Number(e.target.value) })}
+                    min={0}
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="label" style={{ fontWeight: 600, fontSize: '0.8rem' }}>Area (Sq.Ft.) *</label>
+                  <input
+                    type="number"
+                    className="input"
+                    placeholder="1000"
+                    value={formData.areaSqft}
+                    onChange={(e) => setFormData({ ...formData, areaSqft: Number(e.target.value) })}
+                    min={1}
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="label" style={{ fontWeight: 600, fontSize: '0.8rem' }}>Rooms Count *</label>
+                  <input
+                    type="number"
+                    className="input"
+                    placeholder="2"
+                    value={formData.roomCount}
+                    onChange={(e) => setFormData({ ...formData, roomCount: Number(e.target.value) })}
+                    min={1}
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="label" style={{ fontWeight: 600, fontSize: '0.8rem' }}>Status *</label>
+                  <select
+                    className="input"
+                    value={formData.status}
+                    onChange={(e) => setFormData({ ...formData, status: e.target.value })}
+                  >
+                    <option value="ACTIVE">ACTIVE</option>
+                    <option value="OCCUPIED">OCCUPIED</option>
+                    <option value="VACANT">VACANT</option>
+                    <option value="MAINTENANCE">MAINTENANCE</option>
+                    <option value="INACTIVE">INACTIVE</option>
+                  </select>
                 </div>
               </div>
 
-              <div className="card" style={{ padding: 'var(--space-3)', background: 'var(--color-surface-2)' }}>
-                <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>Base Maintenance Rate</div>
-                <div style={{ fontSize: '1.25rem', fontWeight: 800 }}>
-                  Rs. {Number(roomsData?.defaultRate ?? 10).toFixed(2)}
-                </div>
-              </div>
-
-              <div className="card" style={{ padding: 'var(--space-3)', background: 'hsl(142, 70%, 10%)', border: '1px solid var(--color-success-500)' }}>
-                <div style={{ fontSize: '0.75rem', color: 'var(--color-success-100)' }}>Combined Monthly Charge</div>
-                <div style={{ fontSize: '1.25rem', fontWeight: 800, color: 'var(--color-success-400)' }}>
-                  Rs. {Number(roomsData?.totalCharge ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                </div>
-              </div>
-            </div>
-
-            {/* Rooms Breakdown Table */}
-            <div style={{ marginBottom: 'var(--space-5)' }}>
-              <h4 style={{ fontSize: '0.9rem', fontWeight: 700, marginBottom: '8px', color: 'var(--color-text-primary)' }}>
-                Room Schedule & Maintenance Charges
-              </h4>
-
-              {isLoadingRooms ? (
-                <div style={{ padding: 'var(--space-6)', textAlign: 'center' }}>
-                  <Loader2 className="animate-spin" size={24} style={{ margin: '0 auto' }} />
-                </div>
-              ) : !roomsData?.rooms || roomsData.rooms.length === 0 ? (
-                <div
-                  style={{
-                    padding: 'var(--space-6)',
-                    background: 'var(--color-surface-2)',
-                    borderRadius: 'var(--radius-md)',
-                    textAlign: 'center',
-                    color: 'var(--color-text-muted)',
-                  }}
-                >
-                  <p style={{ fontWeight: 600 }}>No individual rooms configured yet.</p>
-                  <p style={{ fontSize: '0.8rem', marginTop: '4px' }}>
-                    This apartment currently bills using its default flat area ({selectedApartment.areaSqft} sq ft). Add rooms below to calculate room-level charges.
-                  </p>
-                </div>
-              ) : (
-                <div style={{ border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', overflow: 'hidden' }}>
-                  <table style={{ width: '100%', fontSize: '0.85rem', borderCollapse: 'collapse' }}>
-                    <thead style={{ background: 'var(--color-surface-2)', borderBottom: '1px solid var(--color-border)' }}>
-                      <tr>
-                        <th style={{ padding: '8px 12px' }}>Room Name / No</th>
-                        <th style={{ padding: '8px 12px' }}>Type</th>
-                        <th style={{ padding: '8px 12px', textAlign: 'right' }}>Area (Sq.Ft.)</th>
-                        <th style={{ padding: '8px 12px', textAlign: 'right' }}>Rate / Sq.Ft.</th>
-                        <th style={{ padding: '8px 12px', textAlign: 'right' }}>Monthly Charge</th>
-                        <th style={{ padding: '8px 12px', textAlign: 'center' }}>Status</th>
-                        <th style={{ padding: '8px 12px', textAlign: 'center' }}>Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {roomsData.rooms.map((r) => {
-                        const isCustomRate = r.maintenanceRate !== null && r.maintenanceRate !== undefined;
-                        return (
-                          <tr key={r.id} style={{ borderBottom: '1px solid var(--color-border-subtle)', opacity: r.isActive ? 1 : 0.6 }}>
-                            <td style={{ padding: '8px 12px', fontWeight: 600 }}>{r.roomNumber}</td>
-                            <td style={{ padding: '8px 12px' }}>
-                              <span
-                                className="badge badge-primary"
-                                style={{ fontSize: '0.7rem', textTransform: 'capitalize' }}
-                              >
-                                {r.roomType.replace('_', ' ').toLowerCase()}
-                              </span>
-                            </td>
-                            <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 600 }}>
-                              {Number(r.areaSqft).toLocaleString()} sq. ft.
-                            </td>
-                            <td style={{ padding: '8px 12px', textAlign: 'right' }}>
-                              Rs. {Number(r.applicableRate).toFixed(2)}
-                              {isCustomRate && (
-                                <span style={{ fontSize: '0.65rem', marginLeft: '4px', color: 'var(--color-brand-400)', fontWeight: 600 }}>
-                                  (Custom)
-                                </span>
-                              )}
-                            </td>
-                            <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 700, color: 'var(--color-brand-400)' }}>
-                              Rs. {Number(r.monthlyCharge).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                            </td>
-                            <td style={{ padding: '8px 12px', textAlign: 'center' }}>
-                              <span
-                                className={`badge ${r.isActive ? 'badge-success' : 'badge-warning'}`}
-                                style={{ fontSize: '0.65rem' }}
-                              >
-                                {r.isActive ? 'Active' : 'Inactive'}
-                              </span>
-                            </td>
-                            <td style={{ padding: '8px 12px', textAlign: 'center' }}>
-                              <div style={{ display: 'flex', justifyContent: 'center', gap: '6px' }}>
-                                <button
-                                  className="btn-ghost"
-                                  title="Edit Room"
-                                  onClick={() => setEditingRoom(r)}
-                                  style={{ padding: '4px' }}
-                                >
-                                  <Edit2 size={13} color="var(--color-text-secondary)" />
-                                </button>
-                                <button
-                                  className="btn-ghost"
-                                  title="Deactivate Room"
-                                  onClick={() => handleDeleteRoom(r.id, r.roomNumber)}
-                                  style={{ padding: '4px' }}
-                                >
-                                  <Trash2 size={13} color="var(--color-danger-500)" />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                      {/* Total Row */}
-                      <tr style={{ background: 'var(--color-surface-2)', fontWeight: 800 }}>
-                        <td colSpan={2} style={{ padding: '10px 12px', textTransform: 'uppercase' }}>
-                          Total ({roomsData.rooms.filter((r) => r.isActive).length} Active Rooms)
-                        </td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', color: 'var(--color-brand-400)' }}>
-                          {Number(roomsData.totalArea).toLocaleString()} sq. ft.
-                        </td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right' }}>-</td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', color: 'var(--color-success-400)', fontSize: '0.95rem' }}>
-                          Rs. {Number(roomsData.totalCharge).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                        </td>
-                        <td colSpan={2}></td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-
-            {/* Edit Room In-Line Form */}
-            {editingRoom && (
+              {/* Owner Information Section */}
               <div
                 style={{
-                  padding: 'var(--space-4)',
                   background: 'var(--color-surface-2)',
+                  padding: 'var(--space-3) var(--space-4)',
                   borderRadius: 'var(--radius-md)',
-                  border: '1px solid var(--color-brand-500)',
-                  marginBottom: 'var(--space-5)',
+                  border: '1px solid var(--color-border)',
                 }}
               >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                  <h4 style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--color-brand-400)', textTransform: 'uppercase' }}>
-                    Edit Room: {editingRoom.roomNumber}
-                  </h4>
-                  <button className="btn-ghost" onClick={() => setEditingRoom(null)}>
-                    <X size={16} />
-                  </button>
+                <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--color-brand-400)', textTransform: 'uppercase', marginBottom: '8px' }}>
+                  Property Owner Particulars
                 </div>
-
-                <form onSubmit={handleUpdateRoom} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-                  <div className="grid grid-3" style={{ gap: 'var(--space-3)' }}>
-                    <div>
-                      <label className="label">Room Name / No *</label>
-                      <input
-                        type="text"
-                        className="input"
-                        value={editingRoom.roomNumber}
-                        onChange={(e) => setEditingRoom({ ...editingRoom, roomNumber: e.target.value })}
-                        required
-                      />
-                    </div>
-
-                    <div>
-                      <label className="label">Room Type *</label>
-                      <select
-                        className="input"
-                        value={editingRoom.roomType}
-                        onChange={(e) => setEditingRoom({ ...editingRoom, roomType: e.target.value as any })}
-                      >
-                        {ROOM_TYPES.map((t) => (
-                          <option key={t.value} value={t.value}>
-                            {t.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="label">Area (Sq.Ft.) *</label>
-                      <input
-                        type="number"
-                        className="input"
-                        value={editingRoom.areaSqft}
-                        onChange={(e) => setEditingRoom({ ...editingRoom, areaSqft: Number(e.target.value) })}
-                        min={1}
-                        required
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-2" style={{ gap: 'var(--space-3)' }}>
-                    <div>
-                      <label className="label">Maintenance Rate (Rs./Sq.Ft.)</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        className="input"
-                        placeholder={`Leave blank to use default (Rs. ${Number(roomsData?.defaultRate ?? 10).toFixed(2)})`}
-                        value={editingRoom.maintenanceRate ?? ''}
-                        onChange={(e) => setEditingRoom({ ...editingRoom, maintenanceRate: e.target.value })}
-                      />
-                    </div>
-
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingTop: '20px' }}>
-                      <input
-                        type="checkbox"
-                        id="editRoomActive"
-                        checked={editingRoom.isActive}
-                        onChange={(e) => setEditingRoom({ ...editingRoom, isActive: e.target.checked })}
-                      />
-                      <label htmlFor="editRoomActive" style={{ fontSize: '0.85rem', cursor: 'pointer' }}>
-                        Room is Active (Included in monthly billing)
-                      </label>
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
-                    <button type="button" className="btn btn-outline" onClick={() => setEditingRoom(null)}>
-                      Cancel
-                    </button>
-                    <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
-                      {isSubmitting ? 'Updating...' : 'Save Room'}
-                    </button>
-                  </div>
-                </form>
-              </div>
-            )}
-
-            {/* ─── ADD ROOM FORM WITH LIVE CALCULATION ─────────── */}
-            <div
-              style={{
-                padding: 'var(--space-4)',
-                background: 'var(--color-surface)',
-                borderRadius: 'var(--radius-md)',
-                border: '1px solid var(--color-border)',
-              }}
-            >
-              <h4 style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--color-brand-400)', textTransform: 'uppercase', marginBottom: 'var(--space-3)' }}>
-                Add New Room to Apartment {selectedApartment.unitNumber}
-              </h4>
-
-              <form onSubmit={handleAddRoom} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-                <div className="grid grid-3" style={{ gap: 'var(--space-3)' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 'var(--space-3)' }}>
                   <div>
-                    <label className="label">Room Name or Number *</label>
+                    <label className="label" style={{ fontSize: '0.75rem' }}>Owner Name</label>
                     <input
                       type="text"
                       className="input"
-                      placeholder="e.g. Bedroom 1, Master Bed, Living Room"
-                      value={roomForm.roomNumber}
-                      onChange={(e) => setRoomForm({ ...roomForm, roomNumber: e.target.value })}
-                      required
+                      placeholder="e.g. Mr. K. Perera"
+                      value={formData.ownerName}
+                      onChange={(e) => setFormData({ ...formData, ownerName: e.target.value })}
                     />
                   </div>
-
                   <div>
-                    <label className="label">Room Type *</label>
-                    <select
-                      className="input"
-                      value={roomForm.roomType}
-                      onChange={(e) => setRoomForm({ ...roomForm, roomType: e.target.value as any })}
-                    >
-                      {ROOM_TYPES.map((t) => (
-                        <option key={t.value} value={t.value}>
-                          {t.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="label">Area in Square Feet (Sq.Ft.) *</label>
+                    <label className="label" style={{ fontSize: '0.75rem' }}>Owner Phone</label>
                     <input
-                      type="number"
+                      type="text"
                       className="input"
-                      placeholder="e.g. 150"
-                      value={roomForm.areaSqft}
-                      onChange={(e) => setRoomForm({ ...roomForm, areaSqft: Number(e.target.value) })}
-                      min={1}
-                      required
+                      placeholder="+94 77 123 4567"
+                      value={formData.ownerPhone}
+                      onChange={(e) => setFormData({ ...formData, ownerPhone: e.target.value })}
                     />
                   </div>
-                </div>
-
-                <div className="grid grid-2" style={{ gap: 'var(--space-3)' }}>
                   <div>
-                    <label className="label">Applicable Rate (Rs. / Sq.Ft.)</label>
+                    <label className="label" style={{ fontSize: '0.75rem' }}>Owner Email</label>
                     <input
-                      type="number"
-                      step="0.01"
+                      type="email"
                       className="input"
-                      placeholder={`Default: Rs. ${Number(roomsData?.defaultRate ?? 10).toFixed(2)} / sq ft`}
-                      value={roomForm.maintenanceRate}
-                      onChange={(e) => setRoomForm({ ...roomForm, maintenanceRate: e.target.value })}
+                      placeholder="owner@example.com"
+                      value={formData.ownerEmail}
+                      onChange={(e) => setFormData({ ...formData, ownerEmail: e.target.value })}
                     />
-                    <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
-                      Leave blank to use apartment complex base rate.
-                    </span>
-                  </div>
-
-                  {/* Immediate Live Calculation Preview Box */}
-                  <div
-                    style={{
-                      padding: 'var(--space-3)',
-                      background: 'var(--color-surface-2)',
-                      borderRadius: 'var(--radius-md)',
-                      border: '1px dashed var(--color-brand-500)',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      justifyContent: 'center',
-                    }}
-                  >
-                    <div style={{ fontSize: '0.75rem', color: 'var(--color-brand-400)', fontWeight: 600 }}>
-                      ⚡ Immediate Calculated Monthly Charge:
-                    </div>
-                    <div style={{ fontSize: '1.15rem', fontWeight: 800, color: 'var(--color-text-primary)', marginTop: '2px' }}>
-                      {Number(roomForm.areaSqft || 0)} sq ft × Rs.{' '}
-                      {Number(roomForm.maintenanceRate !== '' ? roomForm.maintenanceRate : roomsData?.defaultRate ?? 10).toFixed(2)} ={' '}
-                      <span style={{ color: 'var(--color-success-400)' }}>
-                        Rs. {previewAddCharge.toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                      </span>
-                    </div>
                   </div>
                 </div>
+              </div>
 
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--space-2)' }}>
-                  <button
-                    type="submit"
-                    className="btn btn-primary"
-                    disabled={isSubmitting || !roomForm.roomNumber.trim()}
-                    style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
-                  >
-                    <Plus size={16} /> {isSubmitting ? 'Adding...' : 'Add Room to Schedule'}
-                  </button>
+              {/* Resident / Tenant Information Section */}
+              <div
+                style={{
+                  background: 'var(--color-surface-2)',
+                  padding: 'var(--space-3) var(--space-4)',
+                  borderRadius: 'var(--radius-md)',
+                  border: '1px solid var(--color-border)',
+                }}
+              >
+                <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--color-brand-400)', textTransform: 'uppercase', marginBottom: '8px' }}>
+                  Current Resident / Tenant Particulars
                 </div>
-              </form>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 'var(--space-3)' }}>
+                  <div>
+                    <label className="label" style={{ fontSize: '0.75rem' }}>Resident Name</label>
+                    <input
+                      type="text"
+                      className="input"
+                      placeholder="e.g. Mr. K. Perera"
+                      value={formData.residentName}
+                      onChange={(e) => setFormData({ ...formData, residentName: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label className="label" style={{ fontSize: '0.75rem' }}>Resident Phone</label>
+                    <input
+                      type="text"
+                      className="input"
+                      placeholder="+94 77 987 6543"
+                      value={formData.residentPhone}
+                      onChange={(e) => setFormData({ ...formData, residentPhone: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label className="label" style={{ fontSize: '0.75rem' }}>Resident Email</label>
+                    <input
+                      type="email"
+                      className="input"
+                      placeholder="resident@example.com"
+                      value={formData.residentEmail}
+                      onChange={(e) => setFormData({ ...formData, residentEmail: e.target.value })}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Notes */}
+              <div>
+                <label className="label" style={{ fontWeight: 600, fontSize: '0.8rem' }}>Notes / Remarks (Optional)</label>
+                <input
+                  type="text"
+                  className="input"
+                  placeholder="e.g. Corner unit with balcony"
+                  value={formData.notes}
+                  onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
+                />
+              </div>
+
+              {/* Modal Actions */}
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'flex-end',
+                  gap: 'var(--space-3)',
+                  marginTop: 'var(--space-3)',
+                  paddingTop: 'var(--space-3)',
+                  borderTop: '1px solid var(--color-border)',
+                }}
+              >
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={() => setShowModal(false)}
+                  disabled={isSubmitting}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={isSubmitting}
+                  style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+                >
+                  {isSubmitting ? (
+                    <>
+                      <Loader2 className="animate-spin" size={16} />
+                      <span>Saving...</span>
+                    </>
+                  ) : (
+                    <span>{modalMode === 'add' ? 'Save Apartment' : 'Update Apartment'}</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ─── CONFIRMATION MODAL FOR DEACTIVATION ─────────────── */}
+      {deactivateTarget && (
+        <div className="modal-backdrop" style={{ zIndex: 1100 }}>
+          <div className="modal-content" style={{ maxWidth: '440px', borderRadius: 'var(--radius-xl)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: 'var(--space-3)' }}>
+              <div
+                style={{
+                  width: '40px',
+                  height: '40px',
+                  borderRadius: '50%',
+                  background: 'hsl(0, 84%, 15%)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: 'var(--color-danger-500)',
+                }}
+              >
+                <Trash2 size={20} />
+              </div>
+              <div>
+                <h3 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 700 }}>Confirm Deactivation</h3>
+                <span style={{ fontSize: '0.8rem', color: 'var(--color-text-secondary)' }}>
+                  Unit {deactivateTarget.unitNumber}
+                </span>
+              </div>
+            </div>
+
+            <p style={{ fontSize: '0.875rem', color: 'var(--color-text-secondary)', lineHeight: 1.5, margin: 'var(--space-2) 0 var(--space-5)' }}>
+              Are you sure you want to deactivate apartment <strong>{deactivateTarget.unitNumber}</strong>? Existing billing records and financial history will remain preserved.
+            </p>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-3)' }}>
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={() => setDeactivateTarget(null)}
+                disabled={isSubmitting}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                style={{ background: 'var(--color-danger-500)', borderColor: 'var(--color-danger-500)' }}
+                onClick={handleConfirmDeactivate}
+                disabled={isSubmitting}
+              >
+                {isSubmitting ? 'Deactivating...' : 'Yes, Deactivate Unit'}
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ─── 5. MANAGE TOWERS / BLOCKS MODAL ────────────────── */}
+      {/* ─── MANAGE TOWERS / BLOCKS MODAL ────────────────────── */}
       {showTowersModal && (
-        <div className="modal-backdrop">
+        <div className="modal-backdrop" style={{ zIndex: 1000 }}>
           <div className="modal-content" style={{ maxWidth: '640px', maxHeight: '90vh', overflowY: 'auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-4)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -1476,291 +1276,9 @@ export default function ApartmentsPage() {
         </div>
       )}
 
-      {/* ─── ADD APARTMENT MODAL ─────────────────────────────── */}
-      {showAddModal && (
-        <div className="modal-backdrop">
-          <div className="modal-content" style={{ maxWidth: '620px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-4)' }}>
-              <h3 style={{ fontFamily: 'var(--font-display)', fontWeight: 700 }}>Add New Apartment Unit</h3>
-              <button className="btn-ghost" onClick={() => setShowAddModal(false)}>
-                <X size={18} />
-              </button>
-            </div>
-
-            {modalError && (
-              <div
-                style={{
-                  padding: 'var(--space-3)',
-                  background: 'hsl(0, 84%, 12%)',
-                  border: '1px solid var(--color-danger-500)',
-                  borderRadius: 'var(--radius-md)',
-                  color: 'var(--color-danger-100)',
-                  marginBottom: 'var(--space-4)',
-                  fontSize: '0.85rem',
-                }}
-              >
-                {modalError}
-              </div>
-            )}
-
-            <form onSubmit={handleCreate} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-              <div className="grid grid-2" style={{ gap: 'var(--space-3)' }}>
-                <div>
-                  <label className="label">Building / Complex *</label>
-                  <select
-                    className="input"
-                    value={formData.buildingId || selectedBuildingId}
-                    onChange={(e) => setFormData({ ...formData, buildingId: e.target.value })}
-                    required
-                  >
-                    {buildings.map((b) => (
-                      <option key={b.id} value={b.id}>
-                        {b.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="label">Tower / Block</label>
-                  <select
-                    className="input"
-                    value={formData.towerId}
-                    onChange={(e) => setFormData({ ...formData, towerId: e.target.value })}
-                  >
-                    <option value="">No Specific Tower</option>
-                    {towers.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-3" style={{ gap: 'var(--space-3)' }}>
-                <div>
-                  <label className="label">Apartment / Unit No *</label>
-                  <input
-                    type="text"
-                    className="input"
-                    placeholder="e.g. A-101, 6/3"
-                    value={formData.unitNumber}
-                    onChange={(e) => setFormData({ ...formData, unitNumber: e.target.value })}
-                    required
-                  />
-                </div>
-
-                <div>
-                  <label className="label">Floor Level</label>
-                  <input
-                    type="number"
-                    className="input"
-                    value={formData.floor}
-                    onChange={(e) => setFormData({ ...formData, floor: Number(e.target.value) })}
-                    min={0}
-                  />
-                </div>
-
-                <div>
-                  <label className="label">Area (Sq.Ft.) *</label>
-                  <input
-                    type="number"
-                    className="input"
-                    placeholder="e.g. 1000"
-                    value={formData.areaSqft}
-                    onChange={(e) => setFormData({ ...formData, areaSqft: Number(e.target.value) })}
-                    required
-                    min={1}
-                  />
-                </div>
-              </div>
-
-              <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: 'var(--space-3)' }}>
-                <span style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--color-brand-400)', textTransform: 'uppercase' }}>
-                  Owner Particulars
-                </span>
-                <div className="grid grid-3" style={{ gap: 'var(--space-3)', marginTop: '8px' }}>
-                  <div>
-                    <label className="label">Owner Name</label>
-                    <input
-                      type="text"
-                      className="input"
-                      placeholder="e.g. Mr. R. Wickramasinghe"
-                      value={formData.ownerName}
-                      onChange={(e) => setFormData({ ...formData, ownerName: e.target.value })}
-                    />
-                  </div>
-                  <div>
-                    <label className="label">Owner Phone</label>
-                    <input
-                      type="text"
-                      className="input"
-                      placeholder="+94 77 123 4567"
-                      value={formData.ownerPhone}
-                      onChange={(e) => setFormData({ ...formData, ownerPhone: e.target.value })}
-                    />
-                  </div>
-                  <div>
-                    <label className="label">Owner Email</label>
-                    <input
-                      type="email"
-                      className="input"
-                      placeholder="owner@example.com"
-                      value={formData.ownerEmail}
-                      onChange={(e) => setFormData({ ...formData, ownerEmail: e.target.value })}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-3)', marginTop: 'var(--space-2)' }}>
-                <button type="button" className="btn btn-outline" onClick={() => setShowAddModal(false)}>
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
-                  {isSubmitting ? 'Saving...' : 'Add Apartment'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ─── EDIT APARTMENT MODAL ────────────────────────────── */}
-      {showEditModal && selectedApartment && (
-        <div className="modal-backdrop">
-          <div className="modal-content" style={{ maxWidth: '620px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-4)' }}>
-              <h3 style={{ fontFamily: 'var(--font-display)', fontWeight: 700 }}>
-                Edit Apartment {selectedApartment.unitNumber}
-              </h3>
-              <button className="btn-ghost" onClick={() => setShowEditModal(false)}>
-                <X size={18} />
-              </button>
-            </div>
-
-            <form onSubmit={handleUpdate} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-              <div className="grid grid-2" style={{ gap: 'var(--space-3)' }}>
-                <div>
-                  <label className="label">Tower / Block</label>
-                  <select
-                    className="input"
-                    value={formData.towerId}
-                    onChange={(e) => setFormData({ ...formData, towerId: e.target.value })}
-                  >
-                    <option value="">No Specific Tower</option>
-                    {towers.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="label">Apartment / Unit No *</label>
-                  <input
-                    type="text"
-                    className="input"
-                    value={formData.unitNumber}
-                    onChange={(e) => setFormData({ ...formData, unitNumber: e.target.value })}
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-3" style={{ gap: 'var(--space-3)' }}>
-                <div>
-                  <label className="label">Floor Level</label>
-                  <input
-                    type="number"
-                    className="input"
-                    value={formData.floor}
-                    onChange={(e) => setFormData({ ...formData, floor: Number(e.target.value) })}
-                    min={0}
-                  />
-                </div>
-
-                <div>
-                  <label className="label">Area (Sq.Ft.) *</label>
-                  <input
-                    type="number"
-                    className="input"
-                    value={formData.areaSqft}
-                    onChange={(e) => setFormData({ ...formData, areaSqft: Number(e.target.value) })}
-                    required
-                    min={1}
-                  />
-                </div>
-
-                <div>
-                  <label className="label">Status</label>
-                  <select
-                    className="input"
-                    value={formData.status}
-                    onChange={(e) => setFormData({ ...formData, status: e.target.value })}
-                  >
-                    <option value="ACTIVE">Active</option>
-                    <option value="OCCUPIED">Occupied</option>
-                    <option value="VACANT">Vacant</option>
-                    <option value="MAINTENANCE">Maintenance</option>
-                    <option value="INACTIVE">Inactive</option>
-                  </select>
-                </div>
-              </div>
-
-              <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: 'var(--space-3)' }}>
-                <span style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--color-brand-400)', textTransform: 'uppercase' }}>
-                  Owner Particulars
-                </span>
-                <div className="grid grid-3" style={{ gap: 'var(--space-3)', marginTop: '8px' }}>
-                  <div>
-                    <label className="label">Owner Name</label>
-                    <input
-                      type="text"
-                      className="input"
-                      value={formData.ownerName}
-                      onChange={(e) => setFormData({ ...formData, ownerName: e.target.value })}
-                    />
-                  </div>
-                  <div>
-                    <label className="label">Owner Phone</label>
-                    <input
-                      type="text"
-                      className="input"
-                      value={formData.ownerPhone}
-                      onChange={(e) => setFormData({ ...formData, ownerPhone: e.target.value })}
-                    />
-                  </div>
-                  <div>
-                    <label className="label">Owner Email</label>
-                    <input
-                      type="email"
-                      className="input"
-                      value={formData.ownerEmail}
-                      onChange={(e) => setFormData({ ...formData, ownerEmail: e.target.value })}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-3)', marginTop: 'var(--space-2)' }}>
-                <button type="button" className="btn btn-outline" onClick={() => setShowEditModal(false)}>
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
-                  {isSubmitting ? 'Updating...' : 'Save Changes'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
       {/* ─── VIEW APARTMENT MODAL ────────────────────────────── */}
       {showViewModal && selectedApartment && (
-        <div className="modal-backdrop">
+        <div className="modal-backdrop" style={{ zIndex: 1000 }}>
           <div className="modal-content" style={{ maxWidth: '680px', maxHeight: '90vh', overflowY: 'auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-4)' }}>
               <div>
@@ -1793,57 +1311,12 @@ export default function ApartmentsPage() {
               </div>
 
               <div className="card" style={{ padding: 'var(--space-3)', background: 'var(--color-surface-2)' }}>
-                <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>Configured Rooms</div>
+                <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>Total Rooms</div>
                 <div style={{ fontSize: '1.2rem', fontWeight: 800, color: 'var(--color-brand-400)' }}>
-                  {apartmentDetails?.rooms?.length ?? (selectedApartment.rooms?.length || 0)}
+                  {selectedApartment.roomCount ?? (selectedApartment._count?.rooms || selectedApartment.rooms?.length || 1)}
                 </div>
               </div>
             </div>
-
-            {/* Rooms Schedule in View Modal */}
-            {apartmentDetails?.rooms && apartmentDetails.rooms.length > 0 && (
-              <div style={{ marginBottom: 'var(--space-4)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                  <h4 style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--color-brand-400)', textTransform: 'uppercase' }}>
-                    Configured Individual Rooms
-                  </h4>
-                  <button
-                    className="btn btn-outline"
-                    style={{ fontSize: '0.75rem', padding: '2px 8px' }}
-                    onClick={() => {
-                      setShowViewModal(false);
-                      openRoomsModal(selectedApartment);
-                    }}
-                  >
-                    Edit Rooms
-                  </button>
-                </div>
-                <div style={{ border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', overflow: 'hidden' }}>
-                  <table style={{ width: '100%', fontSize: '0.8rem', borderCollapse: 'collapse' }}>
-                    <thead style={{ background: 'var(--color-surface-2)' }}>
-                      <tr>
-                        <th style={{ padding: '6px 12px' }}>Room</th>
-                        <th style={{ padding: '6px 12px' }}>Type</th>
-                        <th style={{ padding: '6px 12px', textAlign: 'right' }}>Area (Sq.Ft.)</th>
-                        <th style={{ padding: '6px 12px', textAlign: 'right' }}>Rate / Sq.Ft.</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {apartmentDetails.rooms.map((rm: any) => (
-                        <tr key={rm.id} style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
-                          <td style={{ padding: '6px 12px', fontWeight: 600 }}>{rm.roomNumber}</td>
-                          <td style={{ padding: '6px 12px' }}>{rm.roomType.replace('_', ' ').toLowerCase()}</td>
-                          <td style={{ padding: '6px 12px', textAlign: 'right' }}>{Number(rm.areaSqft)} sq ft</td>
-                          <td style={{ padding: '6px 12px', textAlign: 'right' }}>
-                            {rm.maintenanceRate ? `Rs. ${Number(rm.maintenanceRate).toFixed(2)}` : 'Building Default'}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
 
             {/* Occupant Particulars */}
             <div className="card" style={{ padding: 'var(--space-4)', background: 'var(--color-surface-2)', marginBottom: 'var(--space-4)' }}>
@@ -1866,7 +1339,18 @@ export default function ApartmentsPage() {
               </div>
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--space-4)' }}>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)', marginTop: 'var(--space-4)' }}>
+              {canManage && (
+                <button
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setShowViewModal(false);
+                    openEditModal(selectedApartment);
+                  }}
+                >
+                  Edit Apartment
+                </button>
+              )}
               <button className="btn btn-outline" onClick={() => setShowViewModal(false)}>
                 Close
               </button>
