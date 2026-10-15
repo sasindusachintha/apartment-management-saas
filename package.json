@@ -1,0 +1,31 @@
+{
+  "name": "apartment-saas",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Apartment management SaaS platform monorepo",
+  "workspaces": [
+    "apps/web",
+    "apps/api",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n web,api -c cyan,magenta \"npm run dev -w apps/web\" \"npm run dev -w apps/api\"",
+    "build": "npm run build -w apps/web && npm run build -w apps/api",
+    "typecheck": "npm run typecheck -w apps/web && npm run typecheck -w apps/api",
+    "lint": "npm run lint -w apps/web && npm run lint -w apps/api",
+    "lint:fix": "npm run lint:fix -w apps/web && npm run lint:fix -w apps/api",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,css}\" --ignore-path .gitignore",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,css}\" --ignore-path .gitignore",
+    "test": "npm run test -w apps/api",
+    "clean": "rimraf apps/web/dist apps/api/dist node_modules/.cache"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "prettier": "^3.3.3",
+    "rimraf": "^5.0.10"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  }
+}
