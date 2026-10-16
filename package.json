@@ -1,4 +1,3 @@
-
 {
   "name": "apartment-saas",
   "version": "1.0.0",
@@ -11,7 +10,8 @@
   ],
   "scripts": {
     "dev": "concurrently -n web,api -c cyan,magenta \"npm run dev -w apps/web\" \"npm run dev -w apps/api\"",
-    "build": "npm run build -w apps/web && npm run build -w apps/api",
+    "prisma:generate": "npm exec -w apps/api -- prisma generate --schema=prisma/schema.prisma",
+    "build": "npm run build -w apps/web && npm run prisma:generate && npm run build -w apps/api",
     "start": "npm run start -w apps/api",
     "typecheck": "npm run typecheck -w apps/web && npm run typecheck -w apps/api",
     "lint": "npm run lint -w apps/web && npm run lint -w apps/api",
