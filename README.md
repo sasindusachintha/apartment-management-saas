@@ -61,7 +61,7 @@ The database uses **MySQL 8 with InnoDB engine**. Deletion rules prevent acciden
 ## 🔐 Authentication & Security Architecture
 
 1. **Password Hashing:**
-   - Powered by native **Argon2id** (`argon2`), resistant to GPU/ASIC cracking
+   - Powered by native **Argon2id** (`argon2`), resistant to GPU/ASIC cracking.
 2. **Session & Refresh Token Management:**
    - **Access Token:** Short-lived JWT (15-minute expiration) kept strictly **in-memory** in frontend state (never `localStorage` or `sessionStorage`).
    - **Refresh Token:** Stored in database as a SHA-256 hash. Transmitted in an **HTTP-only, SameSite=Lax, Secure** cookie (`refresh_token`, 7-day expiration).
