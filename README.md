@@ -1,6 +1,6 @@
 # ApartmentSaaS
 
-> Production-grade Multi-Tenant Apartment Management SaaS platform built with React 18 + Vite 5 + TypeScript (frontend) and NestJS 10 + Prisma 5 + MySQL 8 InnoDB (backend).
+> Production-grade Multi-Tenant Apartment Management SaaS platform built with React 18 + Vite 5 + TypeScript (frontend) and NestJS 10 + Prisma 5 + MySQL 8 InnoDB (backend)
 
 ---
 
